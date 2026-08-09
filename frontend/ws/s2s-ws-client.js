@@ -1150,11 +1150,23 @@ export class S2sWsRealtimeClient extends EventTarget {
   }
 
   async pauseMicCapture() {
+    const needsVadDrain = this._status === "user-speaking";
     this._muted = true;
     try { this._micSrc?.disconnect(); } catch {}
     this._micSrc = null;
     for (const track of this.options.micStream?.getTracks() || []) track.stop();
     this.options.micStream = undefined;
+    // If capture ends while server VAD is inside speech, no further real mic
+    // frames exist to satisfy the 800ms silence boundary. The Voice frontend
+    // already owns PCM transport, so append a bounded zero tail *after* the
+    // physical tracks are stopped. This closes the realtime turn without
+    // keeping the microphone alive or involving Electron/media IPC.
+    if (needsVadDrain && this._ws?.readyState === WebSocket.OPEN && this._sessionConfigured) {
+      const zeroChunk = base64FromArrayBuffer(new ArrayBuffer(1280)); // 40ms PCM16 @ 16kHz
+      for (let i = 0; i < 25; i += 1) {
+        this._send({ type: "input_audio_buffer.append", audio: zeroChunk });
+      }
+    }
     return this.captureStatus();
   }
 
