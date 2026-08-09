@@ -69,6 +69,9 @@
  *   before it's sent. Tunable live via `setNoiseGate`.
  * @property {string} [audioOutputId] MediaDeviceInfo.deviceId for speakers.
  *   Applied via AudioContext.setSinkId when the browser supports it.
+ * @property {boolean} [deferMicCapture] Connect and configure the realtime
+ *   session without acquiring a microphone. The Electron-hosted workspace uses
+ *   this to seed canonical context before resumeMicCapture().
  *
  * @typedef {Object} NoiseGate
  * @property {boolean} enabled
@@ -205,6 +208,12 @@ export class S2sWsRealtimeClient extends EventTarget {
     this._sessionConfigured = false;
     this._startupGreeting = options.startupGreeting?.trim() ?? "";
     this._startupGreetingSent = false;
+    this._deferMicCapture = options.deferMicCapture === true;
+    /** @type {(() => void) | null} */
+    this._configuredResolve = null;
+    this._configuredPromise = new Promise((resolve) => { this._configuredResolve = resolve; });
+    /** @type {Array<{ resolve: (value: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>} */
+    this._pendingItemCreates = [];
     // Bounded, browser-local copy of the exact PCM frames sent over this
     // socket. Backend VAD timestamps turn it into replayable user utterances.
     this._userAudioRecorder = new SentAudioRecorder();
@@ -274,7 +283,7 @@ export class S2sWsRealtimeClient extends EventTarget {
     // Acquire the mic now — only once a slot is actually ours. The caller primed
     // permission up front, so this is silent and the 'in use' indicator lights
     // only for a real, connecting session (never during a queue wait).
-    if (!this.options.micStream && this._acquireMic) {
+    if (!this._deferMicCapture && !this.options.micStream && this._acquireMic) {
       this.options.micStream = await this._acquireMic();
     }
 
@@ -519,17 +528,13 @@ export class S2sWsRealtimeClient extends EventTarget {
     captureNode.port.postMessage({ kind: "gate", ...this._noiseGate });
     this._captureNode = captureNode;
 
-    const micSrc = ctx.createMediaStreamSource(this.options.micStream);
-    micSrc.connect(captureNode);
-    this._micSrc = micSrc;
-
-    // Mic analyser: tap the mic in parallel with the worklet so we get the
-    // raw (un-resampled, un-clipped) signal for the visualiser.
+    // Mic analyser exists even in deferred-capture mode; the real source is
+    // connected only after canonical history has been seeded.
     const micAnalyser = ctx.createAnalyser();
     micAnalyser.fftSize = VIS_FFT_SIZE;
     micAnalyser.smoothingTimeConstant = 0;
-    micSrc.connect(micAnalyser);
     this._micAnalyser = micAnalyser;
+    if (this.options.micStream) this._attachMicStream(this.options.micStream);
 
     const playbackNode = new AudioWorkletNode(ctx, "audio-playback", {
       numberOfInputs: 0,
@@ -670,12 +675,23 @@ export class S2sWsRealtimeClient extends EventTarget {
         // out). We only push the user-tunable bits: voice + instructions.
         this._sendSessionUpdate();
         this._sessionConfigured = true;
+        this._configuredResolve?.();
+        this._configuredResolve = null;
         // The s2s server does not echo session.updated. WebSocket messages are
         // ordered, so this hidden item and response.create are handled only
         // after the session.update sent immediately above.
         this._sendStartupGreeting();
         if (this._status === "connecting") this._setStatus("connected");
         break;
+
+      case "conversation.item.created": {
+        const pending = this._pendingItemCreates.shift();
+        if (pending) {
+          clearTimeout(pending.timer);
+          pending.resolve(event.item || event);
+        }
+        break;
+      }
 
       case "session.updated":
         // Some Realtime servers acknowledge session.update; the greeting was
@@ -1108,6 +1124,85 @@ export class S2sWsRealtimeClient extends EventTarget {
     this._muted = muted;
   }
 
+  _attachMicStream(stream) {
+    if (!this._ctx || !this._captureNode || !this._micAnalyser) {
+      throw new Error("Audio pipeline is not ready");
+    }
+    this._micSrc?.disconnect();
+    const micSrc = this._ctx.createMediaStreamSource(stream);
+    micSrc.connect(this._captureNode);
+    micSrc.connect(this._micAnalyser);
+    this._micSrc = micSrc;
+    this.options.micStream = stream;
+  }
+
+  async resumeMicCapture() {
+    await this._configuredPromise;
+    if (this.options.micStream?.getAudioTracks().some((track) => track.readyState === "live")) {
+      this._muted = false;
+      return this.captureStatus();
+    }
+    if (!this._acquireMic) throw new Error("No microphone acquisition callback configured");
+    const stream = await this._acquireMic();
+    this._attachMicStream(stream);
+    this._muted = false;
+    return this.captureStatus();
+  }
+
+  async pauseMicCapture() {
+    this._muted = true;
+    try { this._micSrc?.disconnect(); } catch {}
+    this._micSrc = null;
+    for (const track of this.options.micStream?.getTracks() || []) track.stop();
+    this.options.micStream = undefined;
+    return this.captureStatus();
+  }
+
+  captureStatus() {
+    const tracks = this.options.micStream?.getAudioTracks() || [];
+    return {
+      paused: tracks.length === 0 || tracks.every((track) => track.readyState === "ended"),
+      hasMicSource: Boolean(this._micSrc),
+      liveTracks: tracks.filter((track) => track.readyState === "live").length,
+      status: this._status,
+    };
+  }
+
+  async waitForSettled(timeoutMs = 15000) {
+    const started = Date.now();
+    while (this._responseActive() || ["user-speaking", "processing", "ai-speaking"].includes(this._status)) {
+      if (Date.now() - started >= timeoutMs) throw new Error("Voice workspace drain timeout");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+
+  async seedConversationHistory(messages, timeoutMs = 5000) {
+    await this._configuredPromise;
+    let accepted = 0;
+    for (const message of messages || []) {
+      const type = message.role === "user" ? "input_text" : "output_text";
+      const ack = new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          const index = this._pendingItemCreates.findIndex((item) => item.resolve === resolve);
+          if (index >= 0) this._pendingItemCreates.splice(index, 1);
+          reject(new Error("conversation.item.created timeout"));
+        }, timeoutMs);
+        this._pendingItemCreates.push({ resolve, reject, timer });
+      });
+      this._send({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: message.role,
+          content: [{ type, text: message.content }],
+        },
+      });
+      await ack;
+      accepted += 1;
+    }
+    return { acceptedMessages: accepted };
+  }
+
   /**
    * Update the mic noise gate live (the user moved the Settings cursor).
    * @param {NoiseGate} gate
@@ -1127,6 +1222,10 @@ export class S2sWsRealtimeClient extends EventTarget {
     // Abort a queue wait in progress: flag it and wake the poll sleep so
     // `_pollQueue` throws "aborted" and connect() unwinds cleanly.
     this._closed = true;
+    for (const pending of this._pendingItemCreates.splice(0)) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("client closed"));
+    }
     this._userAudioRecorder.reset();
     if (this._queueWake) {
       clearTimeout(this._queueTimer);

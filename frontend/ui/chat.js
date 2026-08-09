@@ -307,6 +307,27 @@ export class ChatView {
     this._chatBadge.classList.remove("visible");
   }
 
+  /**
+   * Render a Core-owned canonical snapshot without treating it as new Voice
+   * workspace output. VoiceWorkspace owns delta bookkeeping; this is view only.
+   * @param {Array<{ role: string; content: string; status?: string }>} messages
+   */
+  hydrateCanonical(messages) {
+    this.clear();
+    this.reset();
+    for (const message of messages || []) {
+      if (
+        message?.status === "completed"
+        && (message.role === "user" || message.role === "assistant")
+        && typeof message.content === "string"
+        && message.content.trim()
+      ) {
+        this._appendHistMsg(message.role, message.content, false);
+      }
+    }
+    if (!this._chatHistory.querySelector(".hist-msg")) this.renderEmptyState();
+  }
+
   /** @param {"user"|"assistant"} role @param {string} text @param {boolean} partial @returns {HTMLElement} */
   _appendHistMsg(role, text, partial) {
     const empty = this._chatHistory.querySelector(".chat-empty");

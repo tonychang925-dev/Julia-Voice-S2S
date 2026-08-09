@@ -20,6 +20,7 @@ import { S2sWsRealtimeClient } from "./ws/s2s-ws-client.js";
 import { $, truncateError, DEBUG } from "./ui/dom.js";
 import { ChatView } from "./ui/chat.js";
 import { Account } from "./ui/account.js";
+import { VoiceWorkspace, selectBootstrapWindow } from "./voice-workspace.js";
 
 const DEFAULT_VOICE = "Aiden";
 const DEFAULT_INSTRUCTIONS =
@@ -295,6 +296,9 @@ let pinnedUrl = "";
 // Optional hidden user prompt supplied by the deployment. When non-empty, the
 // client asks the model to greet once after the initial session configuration.
 let startupGreeting = "";
+const hostParams = new URLSearchParams(window.location.search);
+const electronHosted = window.parent !== window && hostParams.has("juliaElectronHost");
+let configReadyPromise = Promise.resolve();
 
 // ── Tool state ──────────────────────────────────────────────────────────────
 let toolsEnabled = loadTools();
@@ -363,6 +367,9 @@ let client = null;
 /** @type {MediaStream | null} */
 let micStream = null;
 let micMuted = false;
+/** @type {VoiceWorkspace | null} */
+let voiceWorkspace = null;
+let workspacePhase = electronHosted ? "UNBOUND" : "STANDALONE";
 
 /** Apply both the user's mute choice and the temporary replay guard. */
 function syncMicMuteState() {
@@ -1293,13 +1300,15 @@ function stopJoinCountdown() {
  * created here, which is still inside the gesture for a direct orb tap.
  * @param {AudioContext | null} [audioContext]
  */
-async function doStart(audioContext = null) {
+async function doStart(audioContext = null, options = {}) {
   // Resolve the target before touching mic/audio so a misconfiguration (e.g.
   // direct mode with no URL) fails fast with a clear message.
   const target = connectionTarget();
 
-  chat.clear();
-  chat.reset();
+  if (!options.preserveCanonicalView) {
+    chat.clear();
+    chat.reset();
+  }
   setState("connecting");
   setCaption("Asking for mic…", "muted");
 
@@ -1313,11 +1322,13 @@ async function doStart(audioContext = null) {
   // release it. The real capture stream is acquired only once a slot is granted
   // (see acquireMicStream), so the mic 'in use' indicator never lights while we
   // sit in the queue. Permission persists, so the later acquire is silent.
-  try {
-    await primeMicPermission();
-  } catch (err) {
-    if (audioContext) void audioContext.close().catch(() => {});
-    throw err;
+  if (!options.deferMicCapture) {
+    try {
+      await primeMicPermission();
+    } catch (err) {
+      if (audioContext) void audioContext.close().catch(() => {});
+      throw err;
+    }
   }
 
   // The webcam is started on arrival (autoStartCamera), so nothing to do here;
@@ -1327,8 +1338,9 @@ async function doStart(audioContext = null) {
     ...target,
     voice: settings.voice,
     instructions: effectiveInstructions(),
-    startupGreeting,
+    startupGreeting: electronHosted ? "" : startupGreeting,
     acquireMic: acquireMicStream,
+    deferMicCapture: options.deferMicCapture === true,
     tools: activeToolDefs(),
     noiseGate: gateParams(settings.noiseGate),
     audioOutputId: settings.audioOutputId || "",
@@ -1364,10 +1376,13 @@ async function doStart(audioContext = null) {
   c.addEventListener("transcript", (e) => {
     const d = /** @type {CustomEvent<{ role: "user" | "assistant"; text: string; partial: boolean; itemId?: string; responseId?: string }>} */ (e).detail;
     chat.onTranscript(d);
+    if (d.role === "user") voiceWorkspace?.onUserTranscript(d);
+    else voiceWorkspace?.onAssistantTranscript(d);
   });
   c.addEventListener("user-turn-started", (e) => {
     const detail = /** @type {CustomEvent<{ itemId?: string }>} */ (e).detail;
     chat.onUserTurnStarted(detail);
+    voiceWorkspace?.onUserTurnStarted(detail.itemId || "");
   });
   c.addEventListener("user-turn-stopped", (e) => {
     const detail = /** @type {CustomEvent<{ itemId?: string }>} */ (e).detail;
@@ -1381,6 +1396,7 @@ async function doStart(audioContext = null) {
   c.addEventListener("response-finished", (e) => {
     const detail = /** @type {CustomEvent<{ responseId: string; status: string; audible?: boolean; transcript?: string }>} */ (e).detail;
     chat.onResponseFinished(detail);
+    voiceWorkspace?.onResponseFinished(detail);
   });
 
   c.addEventListener("toolcall", (e) => {
@@ -1424,6 +1440,9 @@ async function doStart(audioContext = null) {
 
   try {
     await c.connect();
+    if (Array.isArray(options.bootstrapMessages)) {
+      await c.seedConversationHistory(options.bootstrapMessages);
+    }
   } catch (err) {
     // The grant can be refused (402 → limit) or the dial can fail. In LB mode
     // the AudioContext hasn't been adopted by the client yet (the session POST
@@ -1588,7 +1607,7 @@ async function onFatalError(err) {
 setState("idle");
 chat.renderEmptyState();
 initGateArc();
-void fetchConfig();
+configReadyPromise = fetchConfig();
 // Start the webcam as soon as the user lands (camera tool defaults on), and
 // react to later permission changes (re-grant after a denial re-enables it).
 void autoStartCamera();
@@ -1596,6 +1615,130 @@ void watchCameraPermission();
 
 // Reconcile a live session if the tab is closed/hidden mid-call (no teardown).
 window.addEventListener("pagehide", () => { endTrackedSession(); endQueueTicket(); });
+
+function postToElectron(payload) {
+  if (!electronHosted) return;
+  window.parent.postMessage({ source: "julia-voice", ...payload }, "*");
+}
+
+function assertHostMessage(event, payload) {
+  return electronHosted
+    && event.source === window.parent
+    && payload?.source === "julia-electron-v2"
+    && typeof payload.type === "string";
+}
+
+async function bootstrapVoiceWorkspace(payload) {
+  const conversationId = String(payload.conversationId || "").trim();
+  if (!conversationId) throw new Error("Voice bootstrap requires conversationId");
+  workspacePhase = "BOOTSTRAPPING";
+  await configReadyPromise;
+  if (client) await teardown();
+  const bootstrapMessages = selectBootstrapWindow(payload.messages || []);
+  voiceWorkspace = new VoiceWorkspace({
+    conversationId,
+    baseLastMessageId: String(payload.baseLastMessageId || ""),
+    baseMessages: bootstrapMessages,
+  });
+  chat.hydrateCanonical(bootstrapMessages);
+  await doStart(null, {
+    deferMicCapture: true,
+    preserveCanonicalView: true,
+    bootstrapMessages,
+  });
+  workspacePhase = "READY";
+  return {
+    conversationId,
+    voiceSessionId: voiceWorkspace.voiceSessionId,
+    acceptedMessages: bootstrapMessages.length,
+  };
+}
+
+async function handleHostMessage(event) {
+  const payload = event.data;
+  if (!assertHostMessage(event, payload)) return;
+  const requestId = String(payload.requestId || "");
+  try {
+    if (payload.type === "julia.voice.workspace.bootstrap") {
+      const result = await bootstrapVoiceWorkspace(payload);
+      postToElectron({
+        type: "julia.voice.workspace.bootstrapped",
+        requestId,
+        ok: true,
+        ...result,
+      });
+      return;
+    }
+    if (payload.type === "julia.voice.workspace.flush") {
+      if (!voiceWorkspace || payload.conversationId !== voiceWorkspace.conversationId) {
+        throw new Error("Voice workspace conversation mismatch");
+      }
+      workspacePhase = "DRAINING";
+      await client?.waitForSettled();
+      if (!voiceWorkspace.isStable()) throw new Error("Voice workspace is not settled");
+      workspacePhase = "FLUSHING";
+      postToElectron({
+        type: "julia.voice.workspace.delta",
+        requestId,
+        ok: true,
+        conversationId: voiceWorkspace.conversationId,
+        voiceSessionId: voiceWorkspace.voiceSessionId,
+        baseLastMessageId: voiceWorkspace.baseLastMessageId,
+        turns: voiceWorkspace.exportDelta(),
+      });
+      return;
+    }
+    if (payload.type === "julia.voice.workspace.committed") {
+      if (!voiceWorkspace || payload.conversationId !== voiceWorkspace.conversationId) {
+        throw new Error("Voice workspace commit mismatch");
+      }
+      voiceWorkspace.markCommitted(payload.committedTurnIds || [], payload.baseLastMessageId || "");
+      workspacePhase = "COMMITTED";
+      return;
+    }
+    if (payload.type === "voice:lifecycle-command") {
+      let details;
+      if (payload.action === "resumeMicCapture") {
+        if (!voiceWorkspace || workspacePhase === "UNBOUND" || workspacePhase === "BOOTSTRAPPING") {
+          throw new Error("Voice workspace is not ready");
+        }
+        details = await client?.resumeMicCapture();
+        workspacePhase = "ACTIVE";
+      } else if (payload.action === "pauseMicCapture") {
+        details = await client?.pauseMicCapture() || { paused: true, hasMicSource: false };
+        workspacePhase = "DRAINING";
+      } else if (payload.action === "status") {
+        details = client?.captureStatus() || { paused: true, hasMicSource: false };
+      } else {
+        throw new Error(`Unsupported lifecycle action: ${payload.action}`);
+      }
+      postToElectron({
+        type: "voice:lifecycle-ack",
+        requestId,
+        action: payload.action,
+        ok: true,
+        status: details?.paused ? "paused" : "active",
+        state: details?.paused ? "paused" : "active",
+        details: { client: details, paused: details?.paused },
+      });
+    }
+  } catch (error) {
+    postToElectron({
+      type: payload.type === "julia.voice.workspace.bootstrap"
+        ? "julia.voice.workspace.bootstrapped"
+        : payload.type === "julia.voice.workspace.flush"
+          ? "julia.voice.workspace.delta"
+          : "voice:lifecycle-ack",
+      requestId,
+      conversationId: payload.conversationId || voiceWorkspace?.conversationId || "",
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      state: workspacePhase,
+    });
+  }
+}
+
+if (electronHosted) window.addEventListener("message", (event) => { void handleHostMessage(event); });
 
 requestAnimationFrame(() => {
   document.body.classList.remove("booting");
