@@ -1675,6 +1675,7 @@ async function handleHostMessage(event) {
       }
       workspacePhase = "DRAINING";
       await client?.waitForSettled();
+      voiceWorkspace.finalizeAfterDrain();
       if (!voiceWorkspace.isStable()) throw new Error("Voice workspace is not settled");
       workspacePhase = "FLUSHING";
       postToElectron({

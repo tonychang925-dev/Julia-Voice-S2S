@@ -71,3 +71,15 @@ test("conversation workspaces remain isolated", () => {
   assert.equal(a.exportDelta().length, 1);
   assert.equal(b.exportDelta().length, 0);
 });
+
+test("drain finalizes a user-only turn without inventing an assistant message", () => {
+  const workspace = new VoiceWorkspace({ conversationId: "conv-A", voiceSessionId: "drain" });
+  workspace.onUserTranscript({ itemId: "item-1", text: "final question", partial: false });
+  assert.equal(workspace.isStable(), false);
+  workspace.finalizeAfterDrain();
+  assert.equal(workspace.isStable(), true);
+  const [turn] = workspace.exportDelta();
+  assert.equal(turn.user_content, "final question");
+  assert.equal(turn.assistant_content, null);
+  assert.equal(turn.assistant_status, null);
+});

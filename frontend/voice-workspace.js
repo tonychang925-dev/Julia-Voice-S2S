@@ -120,6 +120,26 @@ export class VoiceWorkspace {
     return this._turns.every((turn) => !turn.user_content || (turn._userFinal && turn._settled));
   }
 
+  /**
+   * Called only after the realtime client confirms that no STT/response is in
+   * flight. Close any orphaned final user turn so flush cannot deadlock when a
+   * terminal response event carried no usable assistant transcript.
+   */
+  finalizeAfterDrain() {
+    for (const turn of this._turns) {
+      if (!turn._userFinal || turn._settled) continue;
+      if (turn.assistant_content) {
+        turn.assistant_status = turn.assistant_status || "interrupted";
+        turn.assistant_created_at = turn.assistant_created_at || new Date().toISOString();
+      } else {
+        turn.assistant_content = null;
+        turn.assistant_status = null;
+        turn.assistant_created_at = null;
+      }
+      turn._settled = true;
+    }
+  }
+
   exportDelta() {
     return this._turns
       .filter((turn) => turn._userFinal && turn._settled && !this._committedTurnIds.has(turn.turn_id))
