@@ -458,6 +458,27 @@ def create_app(
 
     @app.websocket("/v1/realtime")
     async def realtime_endpoint(ws: WebSocket) -> None:
+        # ── VOICE-C1B-V: Extract Julia transport routing from query params ─
+        julia_client = (ws.query_params.get("julia_client") or "").strip()
+        julia_conversation_id = (
+            ws.query_params.get("julia_conversation_id") or ""
+        ).strip()
+
+        # Fail closed: julia-electron-v2 MUST have a conversation_id
+        if julia_client == "julia-electron-v2" and not julia_conversation_id:
+            await ws.accept()
+            await send_ws_event(
+                ws,
+                build_error_event(
+                    "Julia conversation is not bound — "
+                    "julia-electron-v2 client must provide julia_conversation_id. "
+                    "Send julia.conversation.bind before starting voice input.",
+                    error_type="conversation_not_bound",
+                ),
+            )
+            await ws.close(code=1008, reason="conversation_not_bound")
+            return
+
         await ws.accept()
 
         transport = WebSocketTransport(ws)
@@ -485,6 +506,22 @@ def create_app(
             session_id = unit.service.register()
             unit.session.session_id = session_id
             logger.info(f"Client connected to pipeline {unit.index} (session {session_id})")
+
+            # ── VOICE-C1B-V: Bind Julia transport BEFORE session.created ───
+            if julia_client:
+                unit.service.bind_julia_transport(
+                    session_id,
+                    client=julia_client,
+                    conversation_id=julia_conversation_id,
+                )
+
+                # Send bind ACK from S2S — proves routing state is stored
+                if julia_client == "julia-electron-v2" and julia_conversation_id:
+                    await send_ws_event(ws, {
+                        "type": "julia.conversation.bound",
+                        "conversation_id": julia_conversation_id,
+                        "ok": True,
+                    })
 
             # Defensive: drain edge queues and reset events so stale data from a
             # previous session that survived SESSION_END propagation doesn't leak.

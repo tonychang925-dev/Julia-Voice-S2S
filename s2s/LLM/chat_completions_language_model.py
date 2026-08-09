@@ -327,12 +327,39 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
         return _build_chat_optional_kwargs(req_tools, req_tool_choice)
 
     def _request(self, api_input: list[dict[str, Any]], optional_kwargs: dict[str, Any]) -> Any:
+        # ── VOICE-C1B-V: Pop Julia transport, NOT passed to OpenAI SDK ─────
+        julia = optional_kwargs.pop("_julia_transport", None)
+
+        # ── Messages: bound → current STT only; standalone → full history ─
+        if julia:
+            current_user = None
+            for msg in reversed(api_input):
+                if msg.get("role") == "user":
+                    current_user = msg
+                    break
+            if current_user is None:
+                raise RuntimeError(
+                    "VOICE-C1B-V: Julia-bound voice turn has no user transcript"
+                )
+            messages = [current_user]
+        else:
+            messages = api_input
+
+        # ── Per-request extra_body copy (NEVER mutate shared self._extra_body) ──
+        extra_body = dict(self._extra_body or {})
+        if julia:
+            extra_body.update({
+                "conversation_id": julia["conversation_id"],
+                "turn_id": julia["turn_id"],
+                "modality": "voice",
+            })
+
         return _request_chat_completions(
             client=self.client,
             model_name=self.model_name,
-            messages=api_input,
+            messages=messages,
             stream=self.stream,
-            extra_body=self._extra_body,
+            extra_body=extra_body,
             timeout=self.request_timeout,
             optional_kwargs=optional_kwargs,
         )

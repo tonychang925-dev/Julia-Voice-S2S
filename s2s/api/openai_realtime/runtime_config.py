@@ -7,6 +7,20 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from speech_to_speech.LLM.chat import Chat
 
 
+# ── VOICE-C1B-V: Julia transport routing context ─────────────────────────────
+
+class JuliaTransportContext(BaseModel):
+    """Per-connection Julia transport routing metadata (NOT cognition/history).
+
+    Distinct from S2S's own ConnState.conversation_id (OpenAI Realtime
+    protocol identifier). This is the Julia Core canonical conversation ID
+    from Electron, passed through the transport control plane only.
+    """
+    client: str = ""              # "julia-electron-v2" or "" (legacy)
+    conversation_id: str = ""     # Julia Core canonical conversation ID
+    bound: bool = False           # True when electron-v2 + valid ID
+
+
 def _apply_update(current: BaseModel, update: BaseModel) -> None:
     """Apply explicitly-set fields from *update* onto *current* in-place,
     recursing into nested BaseModel children so partial nested updates
@@ -41,6 +55,11 @@ class RuntimeConfig(BaseModel):
     session: RealtimeSessionCreateRequest = Field(
         default_factory=lambda: RealtimeSessionCreateRequest(type="realtime"),
         validate_default=True,
+    )
+
+    # VOICE-C1B-V: Julia transport routing (NOT cognition)
+    julia_transport: JuliaTransportContext = Field(
+        default_factory=JuliaTransportContext,
     )
 
     @field_validator("session", mode="after")

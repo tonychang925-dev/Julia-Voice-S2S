@@ -258,6 +258,28 @@ class RealtimeService:
     def _state(self, conn_id: str) -> ConnState:
         return self._conns[conn_id]
 
+    # ── VOICE-C1B-V: Julia transport binding ───────────────────────────
+
+    def bind_julia_transport(
+        self,
+        conn_id: str,
+        *,
+        client: str,
+        conversation_id: str,
+    ) -> None:
+        """Bind a Julia logical conversation ID to this S2S connection.
+
+        Writes into RuntimeConfig.julia_transport — pure routing metadata.
+        Does NOT touch chat history, persona, memory, or session cognition.
+        Called by websocket_router after session registration.
+        """
+        st = self._state(conn_id)
+        st.runtime_config.julia_transport.client = client
+        st.runtime_config.julia_transport.conversation_id = conversation_id
+        st.runtime_config.julia_transport.bound = bool(
+            client == "julia-electron-v2" and conversation_id
+        )
+
     @property
     def connection_ids(self) -> list[str]:
         return list(self._conns)
