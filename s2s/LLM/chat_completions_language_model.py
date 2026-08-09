@@ -330,18 +330,16 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
         # ── VOICE-C1B-V: Pop Julia transport, NOT passed to OpenAI SDK ─────
         julia = optional_kwargs.pop("_julia_transport", None)
 
-        # ── Messages: bound → current STT only; standalone → full history ─
+        # ── Messages: bound → exact input_text; standalone → full history ─
         if julia:
-            current_user = None
-            for msg in reversed(api_input):
-                if msg.get("role") == "user":
-                    current_user = msg
-                    break
-            if current_user is None:
+            # Use exact input_text from GenerateResponseRequest (not guessed
+            # from chat history — avoids language prompt / audio item confusion)
+            input_text = optional_kwargs.pop("_julia_input_text", None)
+            if not input_text:
                 raise RuntimeError(
-                    "VOICE-C1B-V: Julia-bound voice turn has no user transcript"
+                    "VOICE-C1B-V: Julia-bound voice turn has no input_text"
                 )
-            messages = [current_user]
+            messages = [{"role": "user", "content": input_text}]
         else:
             messages = api_input
 

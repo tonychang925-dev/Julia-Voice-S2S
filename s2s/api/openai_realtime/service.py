@@ -4,6 +4,8 @@ from queue import Queue
 from threading import Event as ThreadingEvent
 from typing import Any, Callable, Literal, Optional, TypeVar, Union
 
+from pydantic import BaseModel
+
 from openai.types.realtime import (
     ConversationItem,
     ConversationItemCreatedEvent,
@@ -28,6 +30,15 @@ from openai.types.realtime import (
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
     SessionCreatedEvent,
+
+
+# ── VOICE-C1B-V: Julia conversation bound control event ──────────────────────
+
+class JuliaConversationBoundEvent(BaseModel):
+    """Sent by S2S to frontend when Julia transport binding succeeds."""
+    type: Literal["julia.conversation.bound"] = "julia.conversation.bound"
+    conversation_id: str
+    ok: bool = True
     SessionUpdatedEvent,
     SessionUpdateEvent,
 )
@@ -105,6 +116,7 @@ ServerEvent = Union[
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
+    JuliaConversationBoundEvent,
 ]
 
 RealtimeEvent = Union[ClientEvent, ServerEvent]
@@ -476,6 +488,16 @@ class RealtimeService:
 
         queue = self.text_prompt_queue
         if queue and transcript:
+            # ── VOICE-C1B-V: Speculative authority gate ──────────────────
+            # Julia-bound mode: only fire Brain request after reopen grace
+            # has settled (is_latest_after_reopen_grace). Otherwise
+            # speculative STT revisions would create duplicate Core turns.
+            if cfg.julia_transport.bound and self.speculative_turns:
+                if not self.speculative_turns.is_latest_after_reopen_grace(
+                    event.turn_id, event.turn_revision
+                ):
+                    return events  # suppress — still speculative
+
             st.response_pending = True
             queue.put(
                 GenerateResponseRequest(
@@ -484,6 +506,8 @@ class RealtimeService:
                     turn_id=event.turn_id,
                     turn_revision=event.turn_revision,
                     speech_stopped_at_s=event.speech_stopped_at_s,
+                    # VOICE-C1B-V: exact final STT text
+                    input_text=transcript if transcript else None,
                 )
             )
 

@@ -721,20 +721,16 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
         audio_b64 = self._audio_to_wav_base64(request.audio, request.audio_sample_rate)
         audio_message = active_chat.add_item(make_user_audio_message(audio_b64))
-        optional_kwargs = self._build_audio_optional_kwargs(response, req_tools, req_tool_choice)
+        # ── VOICE-C1B-V: Bound Julia Voice → fail closed for raw audio ────
+        # Core receives STT final text, not raw PCM. Bound audio requests
+        # are a contract violation — do not call Brain.
+        if runtime_config.julia_transport.bound:
+            raise RuntimeError(
+                "VOICE-C1B-V: Julia-bound voice received raw audio request. "
+                "Core requires STT final text, not PCM."
+            )
 
-        # ── VOICE-C1B-V: Pack Julia transport metadata (audio path) ───────
-        transport = runtime_config.julia_transport
-        if transport.bound:
-            if not transport.conversation_id:
-                raise RuntimeError("VOICE-C1B-V: bound Julia voice has no conversation_id")
-            if not turn_id:
-                raise RuntimeError("VOICE-C1B-V: bound Julia voice has no turn_id")
-            optional_kwargs["_julia_transport"] = {
-                "conversation_id": transport.conversation_id,
-                "turn_id": f"voice-{turn_id}",
-                "modality": "voice",
-            }
+        optional_kwargs = self._build_audio_optional_kwargs(response, req_tools, req_tool_choice)
 
         transactional_user_message_id: str | None = None
         history_commit_fn: Callable[[], None] | None = None
@@ -834,6 +830,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 "turn_id": f"voice-{turn_id}",
                 "modality": "voice",
             }
+            # Carry exact STT text from GenerateResponseRequest.input_text
+            if getattr(request, "input_text", None):
+                optional_kwargs["_julia_input_text"] = request.input_text
 
         # CancelScope.is_stale(gen) is checked when the stream iterator advances; a
         # blocked read inside httpx cannot be aborted by cancel_scope.cancel() from

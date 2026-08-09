@@ -517,11 +517,15 @@ def create_app(
 
                 # Send bind ACK from S2S — proves routing state is stored
                 if julia_client == "julia-electron-v2" and julia_conversation_id:
-                    await send_ws_event(ws, {
-                        "type": "julia.conversation.bound",
-                        "conversation_id": julia_conversation_id,
-                        "ok": True,
-                    })
+                    from speech_to_speech.api.openai_realtime.service import (
+                        JuliaConversationBoundEvent,
+                    )
+                    await send_ws_event(
+                        ws,
+                        JuliaConversationBoundEvent(
+                            conversation_id=julia_conversation_id,
+                        ),
+                    )
 
             # Defensive: drain edge queues and reset events so stale data from a
             # previous session that survived SESSION_END propagation doesn't leak.
