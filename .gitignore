@@ -1,0 +1,47 @@
+# Secrets
+.env
+.env.*
+*.key
+*.pem
+id_rsa*
+id_ed25519*
+
+# Python
+venv/
+.venv/
+site-packages/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# Node
+node_modules/
+
+# Logs & temp
+logs/
+tmp/
+*.log
+
+# Models
+models/
+checkpoints/
+*.safetensors
+*.ckpt
+*.pth
+
+# Voice private assets
+voice_private/
+reference_audio/
+*.wav
+*.mp3
+
+# Runtime
+runtime/
+pid/
+*.pid
+
+# OS
+.DS_Store
+Thumbs.db

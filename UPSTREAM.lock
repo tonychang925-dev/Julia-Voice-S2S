@@ -1,0 +1,30 @@
+# UPSTREAM.lock — Frozen upstream dependencies
+# Generated: 2026-08-09
+# Update after every upstream sync.
+
+frontend:
+  name: hf-realtime-voice
+  upstream: https://huggingface.co/spaces/smolagents/hf-realtime-voice
+  upstream_type: HF Space (git clone)
+  deployed_commit: "<TO_BE_FILLED_FROM_AUTODL>"
+  imported_at: 2026-08-09
+  notes: "Run on AutoDL: cd /root/julia_voice_v2/golden/frontend && git rev-parse HEAD"
+
+s2s:
+  name: speech-to-speech
+  upstream: https://github.com/huggingface/speech-to-speech
+  upstream_type: GitHub
+  deployed_version: "<TO_BE_FILLED_FROM_AUTODL>"
+  deployed_commit: "<TO_BE_FILLED_FROM_AUTODL>"
+  imported_at: 2026-08-09
+  license: Apache-2.0
+  notes: "Run on AutoDL: pip show speech-to-speech && python -c 'import inspect, speech_to_speech; print(speech_to_speech.__file__)'"
+
+julia:
+  voice_contract: VOICE-C1B
+  voice_contract_frozen: 2026-08-09
+  brain_commit: 84fbbb9
+  julia_core_commit: 69cca13
+
+# ── Verification ──────────────────────────────────────────────────────────
+# python scripts/verify_upstream.py
