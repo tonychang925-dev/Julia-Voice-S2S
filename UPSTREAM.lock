@@ -1,24 +1,53 @@
 # UPSTREAM.lock — Frozen upstream dependencies
-# Generated: 2026-08-09
+# Generated: 2026-08-09 — AutoDL runtime provenance snapshot
 # Update after every upstream sync.
 
 frontend:
   name: hf-realtime-voice
   upstream: https://huggingface.co/spaces/smolagents/hf-realtime-voice
   upstream_type: HF Space (git clone)
-  deployed_commit: "<TO_BE_FILLED_FROM_AUTODL>"
+  deployed_commit: "17e7387577b1b2208c5bd2a246e44e6814a5f2a0"
+  source_path: "/root/julia_voice_v2/golden/frontend"
+  working_tree_dirty: true
+  dirty_detail: "1 untracked file: requirements.txt.installed"
   imported_at: 2026-08-09
-  notes: "Run on AutoDL: cd /root/julia_voice_v2/golden/frontend && git rev-parse HEAD"
+  key_files:
+    main.js: "12234f68b52a15f714e28756aca2d77ef6249689cbed83dd29fb50249d8e52f1"
+    ws/s2s-ws-client.js: "27beec2be4e946d87c97c33bedad1f3ecfa54eebd30ad064ce8fb53b22c8cb20"
+    server.py: "4b07dff3e55b7aa78d13f60779e88ba4b7ff241023276b73d5bd1461bef8924d"
+    index.html: "cff913bd4646fd69d6afe802309dc6b286f062720ce02868ca9c1c259858390a"
 
 s2s:
   name: speech-to-speech
   upstream: https://github.com/huggingface/speech-to-speech
   upstream_type: GitHub
-  deployed_version: "<TO_BE_FILLED_FROM_AUTODL>"
-  deployed_commit: "<TO_BE_FILLED_FROM_AUTODL>"
+  deployed_version: "0.2.12"
+  deployed_commit: null
+  install_type: pypi
+  source_path: "/root/miniconda3/lib/python3.10/site-packages/speech_to_speech"
+  package_tree_sha256: "53e38870859a94c9ce08b53c788f9d98cdeef7f47222c0fa446f9f2a2c83b7fb"
+  py_file_count: 94
+  working_tree_dirty: false
   imported_at: 2026-08-09
   license: Apache-2.0
-  notes: "Run on AutoDL: pip show speech-to-speech && python -c 'import inspect, speech_to_speech; print(speech_to_speech.__file__)'"
+  key_modules:
+    websocket_router: "4e962f6dcdcb3f05486857db34557393332d8ae9e22c06478ed814001530bc93"
+    runtime_config: "7f7974a9908f2559c4af9129840122790314c5fc84f490b5caf2f8c213f5d44c"
+    service: "31b622c287c946a9604abd56e3531a898084cbd9ab7f53292db9d7146c63a7c2"
+    chat_completions_handler: "4aef412253731a83f649bc79895e233faafc0874638e5efc923a44a49d56e90a"
+    base_llm_handler: "4718f762d3f45bb001296595f588610c0432057039b7de08f2636e0418901c59"
+
+launchers:
+  launch_s2s.py: "ef5e9ada7e6fa466f5e74577e4a278a1a304ac172e0cd2541966b358ef0c5aef"
+  start_frontend.sh: "d911b8be377e75f6bf2dc8abb574adf5cbcd01a638c5f8d3572b62f5e5cffd77"
+
+runtime:
+  frontend_port: 7860
+  s2s_port: 8765
+  brain_target_port: 8089
+  brain_local_port: 18089
+  host: autodl-container-4d7d449e0f-15b65960
+  kernel: 5.15.0-94-generic
 
 julia:
   voice_contract: VOICE-C1B
