@@ -1376,8 +1376,24 @@ async function doStart(audioContext = null, options = {}) {
   c.addEventListener("transcript", (e) => {
     const d = /** @type {CustomEvent<{ role: "user" | "assistant"; text: string; partial: boolean; itemId?: string; responseId?: string }>} */ (e).detail;
     chat.onTranscript(d);
-    if (d.role === "user") voiceWorkspace?.onUserTranscript(d);
-    else voiceWorkspace?.onAssistantTranscript(d);
+    if (d.role === "user") {
+      const turnId = voiceWorkspace?.onUserTranscript(d);
+      if (!d.partial && turnId) {
+        postToElectron({
+          type: "julia.voice.live-message",
+          conversationId: voiceWorkspace?.conversationId || "",
+          voiceSessionId: voiceWorkspace?.voiceSessionId || "",
+          turnId,
+          role: "user",
+          content: d.text,
+          itemId: d.itemId || "",
+          status: "completed",
+          authority: "non_canonical",
+        });
+      }
+    } else {
+      voiceWorkspace?.onAssistantTranscript(d);
+    }
   });
   c.addEventListener("user-turn-started", (e) => {
     const detail = /** @type {CustomEvent<{ itemId?: string }>} */ (e).detail;
@@ -1396,7 +1412,20 @@ async function doStart(audioContext = null, options = {}) {
   c.addEventListener("response-finished", (e) => {
     const detail = /** @type {CustomEvent<{ responseId: string; status: string; audible?: boolean; transcript?: string }>} */ (e).detail;
     chat.onResponseFinished(detail);
-    voiceWorkspace?.onResponseFinished(detail);
+    const turnId = voiceWorkspace?.onResponseFinished(detail);
+    if (turnId && detail.transcript?.trim()) {
+      postToElectron({
+        type: "julia.voice.live-message",
+        conversationId: voiceWorkspace?.conversationId || "",
+        voiceSessionId: voiceWorkspace?.voiceSessionId || "",
+        turnId,
+        role: "assistant",
+        content: detail.transcript,
+        responseId: detail.responseId || "",
+        status: detail.status === "cancelled" ? "interrupted" : "completed",
+        authority: "non_canonical",
+      });
+    }
   });
 
   c.addEventListener("toolcall", (e) => {
