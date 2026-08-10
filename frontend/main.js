@@ -1470,9 +1470,8 @@ async function doStart(audioContext = null, options = {}) {
 
   try {
     await c.connect();
-    if (Array.isArray(options.bootstrapMessages)) {
-      await c.seedConversationHistory(options.bootstrapMessages);
-    }
+    // VC-03: No conversation history seeding. Core is sole authority.
+    // S2S is media transport only. Brain/Core provide context.
   } catch (err) {
     // The grant can be refused (402 → limit) or the dial can fail. In LB mode
     // the AudioContext hasn't been adopted by the client yet (the session POST
@@ -1664,23 +1663,15 @@ async function bootstrapVoiceWorkspace(payload) {
   workspacePhase = "BOOTSTRAPPING";
   await configReadyPromise;
   if (client) await teardown();
-  const bootstrapMessages = selectBootstrapWindow(payload.messages || []);
-  voiceWorkspace = new VoiceWorkspace({
-    conversationId,
-    baseLastMessageId: String(payload.baseLastMessageId || ""),
-    baseMessages: bootstrapMessages,
-  });
-  chat.hydrateCanonical(bootstrapMessages);
-  await doStart(null, {
-    deferMicCapture: true,
-    preserveCanonicalView: true,
-    bootstrapMessages,
-  });
+  voiceWorkspace = new VoiceWorkspace({ conversationId });
+  // VC-03: No history seeding. Core is sole conversation authority.
+  // S2S does not carry conversation history.
+  await doStart(null, { deferMicCapture: true, preserveCanonicalView: true });
   workspacePhase = "READY";
   return {
     conversationId,
     voiceSessionId: voiceWorkspace.voiceSessionId,
-    acceptedMessages: bootstrapMessages.length,
+    acceptedMessages: 0,
   };
 }
 
@@ -1700,35 +1691,20 @@ async function handleHostMessage(event) {
       return;
     }
     if (payload.type === "julia.voice.workspace.flush") {
-      if (!voiceWorkspace || payload.conversationId !== voiceWorkspace.conversationId) {
-        throw new Error("Voice workspace conversation mismatch");
-      }
-      workspacePhase = "DRAINING";
-      await client?.waitForSettled();
-      voiceWorkspace.finalizeAfterDrain();
-      if (!voiceWorkspace.isStable()) throw new Error("Voice workspace is not settled");
-      workspacePhase = "FLUSHING";
+      // VC-03: Core is sole canonical authority. No delta to export.
       postToElectron({
         type: "julia.voice.workspace.delta",
         requestId,
         ok: true,
-        conversationId: voiceWorkspace.conversationId,
-        voiceSessionId: voiceWorkspace.voiceSessionId,
-        baseLastMessageId: voiceWorkspace.baseLastMessageId,
-        turns: voiceWorkspace.exportDelta(),
+        conversationId: voiceWorkspace?.conversationId || payload.conversationId,
+        voiceSessionId: voiceWorkspace?.voiceSessionId || "",
+        baseLastMessageId: "",
+        turns: [],
       });
       return;
     }
     if (payload.type === "julia.voice.workspace.committed") {
-      if (
-        !voiceWorkspace
-        || payload.conversationId !== voiceWorkspace.conversationId
-        || (payload.voiceSessionId && payload.voiceSessionId !== voiceWorkspace.voiceSessionId)
-      ) {
-        return; // C1B-R-I8: stale ACK for another session — silently discard
-      }
-      voiceWorkspace.markCommitted(payload.committedTurnIds || [], payload.baseLastMessageId || "");
-      workspacePhase = "COMMITTED";
+      // VC-03: No shadow turns to mark committed. No-op.
       return;
     }
     if (payload.type === "voice:lifecycle-command") {

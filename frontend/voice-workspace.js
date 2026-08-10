@@ -39,6 +39,11 @@ function cloneTurn(turn) {
 
 export class VoiceWorkspace {
   /**
+   * VC-03: VoiceWorkspace = media/runtime workspace only.
+   * Completed semantic turns live in Core ConversationMessage.
+   * This class generates stable turnIds for UI projection but
+   * does NOT store or export completed conversation truth.
+   *
    * @param {{ conversationId: string; voiceSessionId?: string; baseLastMessageId?: string; baseMessages?: any[] }} input
    */
   constructor(input) {
@@ -46,13 +51,10 @@ export class VoiceWorkspace {
     this.conversationId = input.conversationId;
     this.voiceSessionId = input.voiceSessionId || `vws_${crypto.randomUUID?.() || Date.now()}`;
     this.baseLastMessageId = input.baseLastMessageId || "";
-    this.baseMessages = selectBootstrapWindow(input.baseMessages || []);
     /** @type {Map<string, any>} */
     this._turnByItem = new Map();
     /** @type {Map<string, any>} */
     this._turnByResponse = new Map();
-    /** @type {any[]} */
-    this._turns = [];
     this._committedTurnIds = new Set();
     this._sequence = 0;
   }
@@ -61,17 +63,11 @@ export class VoiceWorkspace {
     const turn = {
       turn_id: `voice:${this.voiceSessionId}:${String(++this._sequence).padStart(4, "0")}`,
       modality: "voice",
-      user_content: "",
-      user_created_at: new Date().toISOString(),
-      assistant_content: null,
-      assistant_status: null,
-      assistant_created_at: null,
       _itemId: itemId,
       _userFinal: false,
       _settled: false,
     };
     this._turnByItem.set(itemId, turn);
-    this._turns.push(turn);
     return turn;
   }
 
@@ -83,73 +79,38 @@ export class VoiceWorkspace {
   onUserTranscript({ itemId, text, partial }) {
     const id = itemId || `anon-user-${this._sequence + 1}`;
     const turn = this._turnByItem.get(id) || this._newTurn(id);
-    turn.user_content = String(text || "").trim();
-    turn._userFinal = !partial && Boolean(turn.user_content);
+    turn._userFinal = !partial && Boolean(String(text || "").trim());
     return turn.turn_id;
-  }
-
-  _latestOpenTurn() {
-    return [...this._turns].reverse().find((turn) => turn._userFinal && !turn._settled) || null;
   }
 
   onAssistantTranscript({ responseId, text }) {
+    // VC-03: Assistant canonicalization lives in Core.
+    // VoiceWorkspace only tracks response→turn mapping for UX.
     const rid = responseId || `anon-response-${this._sequence}`;
-    const turn = this._turnByResponse.get(rid) || this._latestOpenTurn();
-    if (!turn) return null;
-    this._turnByResponse.set(rid, turn);
-    turn.assistant_content = String(text || "").trim() || null;
-    return turn.turn_id;
+    this._turnByResponse.set(rid, rid);
+    return null;
   }
 
   onResponseFinished({ responseId, status, transcript }) {
+    // VC-03: Assistant canonicalization lives in Core.
+    // Return the linked turn_id for postToElectron projection bridge.
     const rid = responseId || `anon-response-${this._sequence}`;
-    const turn = this._turnByResponse.get(rid) || this._latestOpenTurn();
-    if (!turn) return null;
-    this._turnByResponse.set(rid, turn);
-    const content = String(transcript || turn.assistant_content || "").trim();
-    turn.assistant_content = content || null;
-    turn.assistant_status = content ? (status === "cancelled" ? "interrupted" : "completed") : null;
-    turn.assistant_created_at = content ? new Date().toISOString() : null;
-    // A tool-call response can finish without transcript and be followed by a
-    // second response carrying the actual answer. Keep that logical turn open.
-    turn._settled = Boolean(content) || status === "cancelled" || status === "failed";
-    return turn.turn_id;
+    const linkedTurnId = this._turnByResponse.get(rid);
+    return linkedTurnId || null;
   }
 
   isStable() {
-    return this._turns.every((turn) => !turn.user_content || (turn._userFinal && turn._settled));
+    // VC-03: No accumulated turns to drain. Always stable.
+    return true;
   }
 
-  /**
-   * Called only after the realtime client confirms that no STT/response is in
-   * flight. Close any orphaned final user turn so flush cannot deadlock when a
-   * terminal response event carried no usable assistant transcript.
-   */
   finalizeAfterDrain() {
-    for (const turn of this._turns) {
-      if (!turn._userFinal || turn._settled) continue;
-      if (turn.assistant_content) {
-        turn.assistant_status = turn.assistant_status || "interrupted";
-        turn.assistant_created_at = turn.assistant_created_at || new Date().toISOString();
-      } else {
-        turn.assistant_content = null;
-        turn.assistant_status = null;
-        turn.assistant_created_at = null;
-      }
-      turn._settled = true;
-    }
+    // VC-03: No accumulated turns. No-op.
   }
 
   exportDelta() {
-    return this._turns
-      .filter((turn) => turn._userFinal && turn._settled && !this._committedTurnIds.has(turn.turn_id))
-      .map((turn) => {
-        const clean = cloneTurn(turn);
-        for (const key of Object.keys(clean)) {
-          if (key.startsWith("_")) delete clean[key];
-        }
-        return clean;
-      });
+    // VC-03: No shadow conversation turns. Core is sole canonical authority.
+    return [];
   }
 
   markCommitted(turnIds, baseLastMessageId = "") {
