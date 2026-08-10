@@ -342,6 +342,7 @@ function pushToolsToSession() {
 // streaming state. The client's events are forwarded to its on* methods.
 let userAudioReplaying = false;
 const chat = new ChatView({
+  electronHosted,
   onUserAudioPlaybackChange(playing) {
     userAudioReplaying = playing;
     syncMicMuteState();

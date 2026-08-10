@@ -28,6 +28,7 @@ export class ChatView {
    * @param {{ onUserAudioPlaybackChange?: (playing: boolean) => void }} [options]
    */
   constructor(options = {}) {
+    this._electronHosted = Boolean(options.electronHosted);
     /** @type {HTMLButtonElement} */
     this._chatBtn = $("#chat-btn");
     /** @type {HTMLSpanElement} */
@@ -77,6 +78,10 @@ export class ChatView {
     // bubble) so dismissal is strictly oldest-first regardless of per-bubble delays.
     this._reaperHandle = 0;
 
+    if (this._electronHosted) {
+      this._chatBtn.style.display = 'none';
+      this._chatBadge.style.display = 'none';
+    }
     this._chatBtn.addEventListener("click", () => (this._panelOpen ? this._closePanel() : this._openPanel()));
     this._chatPanelClose.addEventListener("click", () => this._closePanel());
     this._chatPanelBackdrop.addEventListener("click", () => this._closePanel());
@@ -313,6 +318,7 @@ export class ChatView {
    * @param {Array<{ role: string; content: string; status?: string }>} messages
    */
   hydrateCanonical(messages) {
+    if (this._electronHosted) return;
     this.clear();
     this.reset();
     for (const message of messages || []) {
@@ -372,6 +378,7 @@ export class ChatView {
    * @param {string} name @param {string} argsJson @param {string} output
    */
   _appendHistTool(name, argsJson, output) {
+    if (this._electronHosted) return;
     const empty = this._chatHistory.querySelector(".chat-empty");
     if (empty) empty.remove();
     let pretty = argsJson;
@@ -406,7 +413,7 @@ export class ChatView {
   /** Tag an assistant history row as interrupted (user barged in mid-reply).
    *  @param {HTMLElement | null} hist */
   _markHistInterrupted(hist) {
-    if (!hist || hist.querySelector(".hist-note")) return;
+    if (this._electronHosted || !hist || hist.querySelector(".hist-note")) return;
     hist.classList.add("interrupted");
     const note = document.createElement("div");
     note.className = "hist-note";
@@ -417,6 +424,7 @@ export class ChatView {
   /** Render a captured webcam frame in the transcript (the camera tool result).
    *  @param {string} dataUrl */
   _appendHistImage(dataUrl) {
+    if (this._electronHosted) return;
     const empty = this._chatHistory.querySelector(".chat-empty");
     if (empty) empty.remove();
     const el = document.createElement("div");
@@ -501,8 +509,10 @@ export class ChatView {
       const id = d.itemId || this._activeUserItemId || `_u${++this._anonSeq}`;
       const text = d.text;
 
-      const hist = this._ensureUserHist(id);
-      this._updateHistMsg(hist, text, d.partial);
+      if (!this._electronHosted) {
+        const hist = this._ensureUserHist(id);
+        this._updateHistMsg(hist, text, d.partial);
+      }
 
       // One ephemeral bubble per active item. Purely timer-based: the timer is
       // refreshed on every delta, so it stays while the user keeps talking and
@@ -529,11 +539,14 @@ export class ChatView {
       const entry = this._asstByResp.get(rid);
       if (!entry) {
         const bubble = this._spawnBubble("assistant", d.text);
-        this._asstByResp.set(rid, { bubble, hist: this._appendHistMsg("assistant", d.text, false) });
+        const hist = this._electronHosted ? null : this._appendHistMsg("assistant", d.text, false);
+        this._asstByResp.set(rid, { bubble, hist });
         this._bumpDismiss(bubble);
       } else {
         this._updateBubbleText(entry.bubble, d.text);
-        this._updateHistMsg(entry.hist, d.text, false);
+        if (!this._electronHosted && entry.hist) {
+          this._updateHistMsg(entry.hist, d.text, false);
+        }
         this._bumpDismiss(entry.bubble);
       }
       this._markUnread();
