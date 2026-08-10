@@ -84,19 +84,25 @@ export class VoiceWorkspace {
   }
 
   onAssistantTranscript({ responseId, text }) {
-    // VC-03: Assistant canonicalization lives in Core.
-    // VoiceWorkspace only tracks response→turn mapping for UX.
+    // VC-03: Track response→turn mapping for postToElectron bridge.
     const rid = responseId || `anon-response-${this._sequence}`;
-    this._turnByResponse.set(rid, rid);
-    return null;
+    this._turnByResponse.set(rid, this._latestTurnId);
+    return this._latestTurnId;
   }
 
   onResponseFinished({ responseId, status, transcript }) {
-    // VC-03: Assistant canonicalization lives in Core.
-    // Return the linked turn_id for postToElectron projection bridge.
+    // VC-03: Return turn_id for postToElectron projection bridge.
     const rid = responseId || `anon-response-${this._sequence}`;
-    const linkedTurnId = this._turnByResponse.get(rid);
-    return linkedTurnId || null;
+    const turnId = this._turnByResponse.get(rid) || this._latestTurnId;
+    return turnId || null;
+  }
+
+  get _latestTurnId() {
+    let latest = null;
+    for (const turn of this._turnByItem.values()) {
+      if (turn._userFinal) latest = turn.turn_id;
+    }
+    return latest;
   }
 
   isStable() {
