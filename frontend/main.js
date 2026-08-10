@@ -1719,8 +1719,12 @@ async function handleHostMessage(event) {
       return;
     }
     if (payload.type === "julia.voice.workspace.committed") {
-      if (!voiceWorkspace || payload.conversationId !== voiceWorkspace.conversationId) {
-        throw new Error("Voice workspace commit mismatch");
+      if (
+        !voiceWorkspace
+        || payload.conversationId !== voiceWorkspace.conversationId
+        || (payload.voiceSessionId && payload.voiceSessionId !== voiceWorkspace.voiceSessionId)
+      ) {
+        return; // C1B-R-I8: stale ACK for another session — silently discard
       }
       voiceWorkspace.markCommitted(payload.committedTurnIds || [], payload.baseLastMessageId || "");
       workspacePhase = "COMMITTED";
