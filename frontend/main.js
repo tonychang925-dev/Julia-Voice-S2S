@@ -1646,7 +1646,8 @@ void watchCameraPermission();
 window.addEventListener("pagehide", () => { endTrackedSession(); endQueueTicket(); });
 
 function postToElectron(payload) {
-  if (!electronHosted) return;
+  if (!electronHosted) { console.warn("[V2_DIAG_VOICE] postToElectron skipped — not electronHosted"); return; }
+  console.log("[V2_DIAG_VOICE] postToElectron", { type: payload.type, conversationId: payload.conversationId, role: payload.role });
   window.parent.postMessage({ source: "julia-voice", ...payload }, "*");
 }
 
