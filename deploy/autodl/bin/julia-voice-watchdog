@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/root/miniconda3/bin/python3
 import os, subprocess, sys, time
 interval=int(os.environ.get('JULIA_VOICE_WATCHDOG_INTERVAL','45'))
 fail_threshold=int(os.environ.get('JULIA_VOICE_WATCHDOG_FAILS','3'))
