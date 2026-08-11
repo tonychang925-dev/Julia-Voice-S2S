@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+import os, socket, sys
+host=os.environ.get('JULIA_VOICE_HEALTH_HOST','127.0.0.1')
+port=int(os.environ.get('S2S_PORT','8765'))
+try:
+    with socket.create_connection((host,port), timeout=float(os.environ.get('JULIA_VOICE_HEALTH_TIMEOUT','3'))):
+        print('READY')
+        sys.exit(0)
+except Exception as e:
+    print(f'UNHEALTHY {type(e).__name__}: {e}')
+    sys.exit(1)

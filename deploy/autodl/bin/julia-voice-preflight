@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+import hashlib, os, pathlib, sys
+
+def sha(p):
+    h=hashlib.sha256()
+    with open(p,'rb') as f:
+        for b in iter(lambda:f.read(1024*1024), b''):
+            h.update(b)
+    return h.hexdigest()
+
+def require_path(label, path, kind='exists'):
+    p=pathlib.Path(path)
+    ok = p.exists() if kind=='exists' else p.is_file() if kind=='file' else p.is_dir()
+    if not ok:
+        raise SystemExit(f'PRECHECK FAIL {label}: missing {path}')
+    return p
+
+def require_sha(label, path, expected):
+    p=require_path(label,path,'file')
+    actual=sha(p)
+    if actual != expected:
+        raise SystemExit(f'PRECHECK FAIL {label}: sha mismatch {actual} != {expected}')
+
+release=os.environ.get('JULIA_S2S_RELEASE_ROOT','/root/julia_voice_v2/releases/rmd3g-c1-b18d1e42')
+release_path=pathlib.Path(release)/'release'
+require_path('release', release_path, 'dir')
+require_path('python', os.environ.get('JULIA_S2S_PYTHON','/root/miniconda3/bin/python'), 'file')
+require_path('console', os.environ.get('JULIA_S2S_CONSOLE','/root/miniconda3/bin/speech-to-speech'), 'file')
+require_sha('base', release_path/'speech_to_speech/LLM/base_openai_compatible_language_model.py', '2f904a05128d5b11c92e6a2bd04769cd12c6e06f3a66e7d23dbb09b7eb34004c')
+require_sha('chat', release_path/'speech_to_speech/LLM/chat_completions_language_model.py', '725db87b6313a2cc601173be751ea8bca258eb2c601450ac4a0e273f92acb621')
+require_sha('router', release_path/'speech_to_speech/api/openai_realtime/websocket_router.py', '12769ece09b8da10f6ea7be06064cb37dc58d8a41026d8d47bfe1d6ecd0c033c')
+require_sha('ref_audio', os.environ.get('REF_AUDIO','/root/julia_voice_v2/golden/julia_ref.wav'), os.environ.get('REF_AUDIO_SHA256','48d65eba7f4c76259dcd3d5106fd6579cb80c3e8621c08c2ab13ba60460324fc'))
+require_sha('silero_jit', pathlib.Path(os.environ.get('SILERO_CACHE','/root/.cache/torch/hub/snakers4_silero-vad_master'))/'src/silero_vad/data/silero_vad.jit', os.environ.get('SILERO_JIT_SHA256','e1122837f4154c511485fe0b9c64455f7b929c96fbb8d79fbdb336383ebd3720'))
+require_sha('smartturn_onnx', pathlib.Path(os.environ.get('SMARTTURN_SNAPSHOT','/root/autodl-tmp/huggingface/hub/models--pipecat-ai--smart-turn-v3/snapshots/f766f81d3cfdf7737ac64aad813d91bbfd56bf93'))/'smart-turn-v3.2-cpu.onnx', os.environ.get('SMARTTURN_ONNX_SHA256','2bb026316b14a660486a75b1733cd3fbab8c2fd0314dc9af7be49f8cca967e4f'))
+qwen=pathlib.Path(os.environ.get('QWEN3_SNAPSHOT','/root/autodl-tmp/huggingface/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-Base/snapshots/fd4b254389122332181a7c3db7f27e918eec64e3'))
+require_sha('qwen_config', qwen/'config.json', os.environ.get('QWEN3_CONFIG_SHA256','b4f01752d15a488abde3e1ab44723ae4f4b9e68a4037257b098b3737893cc1f9'))
+require_sha('qwen_model', qwen/'model.safetensors', os.environ.get('QWEN3_MODEL_SHA256','38fc7fc51c5e776e840414b6fd443962e9411b9654888fd7913e4da643cb857c'))
+print('PRECHECK OK')

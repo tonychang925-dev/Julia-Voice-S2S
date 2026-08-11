@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+import os, subprocess, sys, time
+interval=int(os.environ.get('JULIA_VOICE_WATCHDOG_INTERVAL','45'))
+fail_threshold=int(os.environ.get('JULIA_VOICE_WATCHDOG_FAILS','3'))
+health=os.environ.get('JULIA_VOICE_HEALTH','/opt/julia/bin/julia-voice-health')
+restart_cmd=os.environ.get('JULIA_VOICE_RESTART_CMD','supervisorctl restart julia-voice')
+fails=0
+while True:
+    rc=subprocess.run([health], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True).returncode
+    if rc==0:
+        fails=0
+    else:
+        fails+=1
+        print(f'watchdog health failure {fails}/{fail_threshold}', flush=True)
+        if fails>=fail_threshold:
+            print(f'watchdog restarting via: {restart_cmd}', flush=True)
+            subprocess.run(restart_cmd.split(), stdout=subprocess.STDOUT, stderr=subprocess.STDOUT)
+            fails=0
+    time.sleep(interval)
