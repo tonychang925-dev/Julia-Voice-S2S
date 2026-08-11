@@ -1,3 +1,7 @@
+STATUS: HISTORICAL
+SUPERSEDED BY: docs/authority/CURRENT_AUTHORITY.md for current production identity
+DO NOT USE AS CURRENT PRODUCTION AUTHORITY
+
 # VOICE-C1B — Conversation Transport Binding
 
 **Status**: Contract frozen 2026-08-09. Implementation in progress.
