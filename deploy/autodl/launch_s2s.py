@@ -21,9 +21,9 @@ CONSOLE = os.environ.get("JULIA_S2S_CONSOLE", "/root/miniconda3/bin/speech-to-sp
 
 # Runtime environment copied from the last known-good production launcher.
 os.environ["PATH"] = "/root/miniconda3/bin:" + os.environ.get("PATH", "")
-os.environ["HF_ENDPOINT"] = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
-os.environ["HF_HOME"] = os.environ.get("HF_HOME", "/root/autodl-tmp/huggingface")
-os.environ["LANG"] = os.environ.get("LANG", "en_US.UTF-8")
+os.environ["HF_ENDPOINT"] = os.environ.get("JULIA_HF_ENDPOINT", "https://hf-mirror.com")
+os.environ["HF_HOME"] = os.environ.get("JULIA_HF_HOME", "/root/autodl-tmp/huggingface")
+os.environ["LANG"] = os.environ.get("JULIA_LANG", "en_US.UTF-8")
 
 # Immutable C1 release authority. This is the fixed _voice_trace_id runtime.
 os.environ["PYTHONPATH"] = str(RELEASE_PATH)
