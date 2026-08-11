@@ -49,7 +49,7 @@ test("RMD-3A T08: session metadata carries only identity, not semantic history",
   assert.equal(session.tool_choice, "auto");
 });
 
-test("RMD-3A T01 source handoff: doStart passes VoiceWorkspace conversationId", () => {
+test("RMD-3A/CC-1-C2 source handoff: doStart passes canonical or VoiceWorkspace conversationId", () => {
   const source = readFileSync(new URL("../main.js", import.meta.url), "utf8");
-  assert.match(source, /new S2sWsRealtimeClient\(\{[\s\S]*conversationId:\s*voiceWorkspace\?\.conversationId \|\| ""/);
+  assert.match(source, /new S2sWsRealtimeClient\(\{[\s\S]*conversationId:\s*activeCanonicalConversationId \|\| voiceWorkspace\?\.conversationId \|\| ""/);
 });

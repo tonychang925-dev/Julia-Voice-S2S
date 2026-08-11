@@ -371,6 +371,9 @@ let micMuted = false;
 /** @type {VoiceWorkspace | null} */
 let voiceWorkspace = null;
 let workspacePhase = electronHosted ? "UNBOUND" : "STANDALONE";
+// CC-1-C2: Core conversation identity mirrored for S2S transport only.
+// Not semantic history, not durable state, not conversation authority.
+let activeCanonicalConversationId = "";
 
 /** Apply both the user's mute choice and the temporary replay guard. */
 function syncMicMuteState() {
@@ -1337,7 +1340,7 @@ async function doStart(audioContext = null, options = {}) {
 
   const c = new S2sWsRealtimeClient({
     ...target,
-    conversationId: voiceWorkspace?.conversationId || "",
+    conversationId: activeCanonicalConversationId || voiceWorkspace?.conversationId || "",
     voice: settings.voice,
     instructions: effectiveInstructions(),
     startupGreeting: electronHosted ? "" : startupGreeting,
@@ -1383,7 +1386,7 @@ async function doStart(audioContext = null, options = {}) {
       if (!d.partial && turnId) {
         postToElectron({
           type: "julia.voice.live-message",
-          conversationId: voiceWorkspace?.conversationId || "",
+          conversationId: activeCanonicalConversationId || voiceWorkspace?.conversationId || "",
           voiceSessionId: voiceWorkspace?.voiceSessionId || "",
           turnId,
           role: "user",
@@ -1418,7 +1421,7 @@ async function doStart(audioContext = null, options = {}) {
     if (turnId && detail.transcript?.trim()) {
       postToElectron({
         type: "julia.voice.live-message",
-        conversationId: voiceWorkspace?.conversationId || "",
+        conversationId: activeCanonicalConversationId || voiceWorkspace?.conversationId || "",
         voiceSessionId: voiceWorkspace?.voiceSessionId || "",
         turnId,
         role: "assistant",
@@ -1659,22 +1662,37 @@ function assertHostMessage(event, payload) {
     && typeof payload.type === "string";
 }
 
-async function bootstrapVoiceWorkspace(payload) {
+async function bindCanonicalConversation(payload) {
   const conversationId = String(payload.conversationId || "").trim();
-  if (!conversationId) throw new Error("Voice bootstrap requires conversationId");
+  if (!conversationId) throw new Error("Voice bind requires conversationId");
+  if (Array.isArray(payload.messages) && payload.messages.length) {
+    throw new Error("CC-1 bind must not carry message history");
+  }
+  if (activeCanonicalConversationId === conversationId && voiceWorkspace?.conversationId === conversationId) {
+    return {
+      conversationId,
+      voiceSessionId: voiceWorkspace.voiceSessionId,
+      reused: true,
+    };
+  }
   workspacePhase = "BOOTSTRAPPING";
   await configReadyPromise;
   if (client) await teardown();
+  activeCanonicalConversationId = conversationId;
   voiceWorkspace = new VoiceWorkspace({ conversationId });
-  // VC-03: No history seeding. Core is sole conversation authority.
-  // S2S does not carry conversation history.
+  // CC-1-C2: bind is transport identity only. Do not seed copied history.
   await doStart(null, { deferMicCapture: true, preserveCanonicalView: true });
   workspacePhase = "READY";
   return {
     conversationId,
     voiceSessionId: voiceWorkspace.voiceSessionId,
-    acceptedMessages: 0,
+    reused: false,
   };
+}
+
+async function bootstrapVoiceWorkspace(payload) {
+  // Legacy compatibility only: no message seeding, no copied semantic history.
+  return bindCanonicalConversation({ ...payload, messages: [] });
 }
 
 async function handleHostMessage(event) {
@@ -1682,6 +1700,16 @@ async function handleHostMessage(event) {
   if (!assertHostMessage(event, payload)) return;
   const requestId = String(payload.requestId || "");
   try {
+    if (payload.type === "julia.voice.conversation.bind") {
+      const result = await bindCanonicalConversation(payload);
+      postToElectron({
+        type: "julia.voice.conversation.bound",
+        requestId,
+        ok: true,
+        ...result,
+      });
+      return;
+    }
     if (payload.type === "julia.voice.workspace.bootstrap") {
       const result = await bootstrapVoiceWorkspace(payload);
       postToElectron({
@@ -1737,11 +1765,13 @@ async function handleHostMessage(event) {
     }
   } catch (error) {
     postToElectron({
-      type: payload.type === "julia.voice.workspace.bootstrap"
-        ? "julia.voice.workspace.bootstrapped"
-        : payload.type === "julia.voice.workspace.flush"
-          ? "julia.voice.workspace.delta"
-          : "voice:lifecycle-ack",
+      type: payload.type === "julia.voice.conversation.bind"
+        ? "julia.voice.conversation.bound"
+        : payload.type === "julia.voice.workspace.bootstrap"
+          ? "julia.voice.workspace.bootstrapped"
+          : payload.type === "julia.voice.workspace.flush"
+            ? "julia.voice.workspace.delta"
+            : "voice:lifecycle-ack",
       requestId,
       conversationId: payload.conversationId || voiceWorkspace?.conversationId || "",
       ok: false,
