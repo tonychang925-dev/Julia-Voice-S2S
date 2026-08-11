@@ -57,7 +57,8 @@ Failure root cause:
 
 C2 source authority:
 
-- Voice C2 source commit: `850a94b516ef71d57f74960a8161cc46be7ba03b`
+- Voice C2 code commit: `850a94b516ef71d57f74960a8161cc46be7ba03b`
+- Voice C2 source package HEAD: `a4afa86173cc4321210ee96ac515f07a53a39533`
 - Active receiver: `frontend/main.js` handles `julia.voice.conversation.bind` and ACKs `julia.voice.conversation.bound`.
 - S2S transport: `S2sWsRealtimeClient` receives the active canonical `conversationId`.
 - Old workspace bootstrap/flush are legacy compatibility only and must not seed semantic history.
