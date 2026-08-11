@@ -1337,6 +1337,7 @@ async function doStart(audioContext = null, options = {}) {
 
   const c = new S2sWsRealtimeClient({
     ...target,
+    conversationId: voiceWorkspace?.conversationId || "",
     voice: settings.voice,
     instructions: effectiveInstructions(),
     startupGreeting: electronHosted ? "" : startupGreeting,

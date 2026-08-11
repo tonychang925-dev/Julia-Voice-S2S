@@ -53,6 +53,8 @@
  * @property {string} instructions
  * @property {string} [startupGreeting] Hidden user prompt that asks the model
  *   to greet once after the initial session configuration is sent.
+ * @property {string} [conversationId] Canonical Core conversation identity for
+ *   Julia-bound realtime sessions. This is identifier-only; never history.
  * @property {MediaStream} [micStream] Live mic stream. Provide this OR `acquireMic`.
  * @property {() => Promise<MediaStream>} [acquireMic] Lazily obtain the mic stream,
  *   called only once a session is actually granted (after any queue wait). Lets the
@@ -208,6 +210,7 @@ export class S2sWsRealtimeClient extends EventTarget {
     this._sessionConfigured = false;
     this._startupGreeting = options.startupGreeting?.trim() ?? "";
     this._startupGreetingSent = false;
+    this._conversationId = options.conversationId ?? "";
     this._deferMicCapture = options.deferMicCapture === true;
     /** @type {(() => void) | null} */
     this._configuredResolve = null;
@@ -985,6 +988,10 @@ export class S2sWsRealtimeClient extends EventTarget {
         output: { voice: this.options.voice },
       },
     };
+    const conversationId = String(this._conversationId || "").trim();
+    if (conversationId) {
+      session.metadata = { conversation_id: conversationId };
+    }
     // Tools are declared here; the backend already accepts them in
     // session.update and emits response.function_call_arguments.done when the
     // model decides to call one. Only include the keys when we actually have
