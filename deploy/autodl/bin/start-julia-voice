@@ -10,6 +10,8 @@ export PATH="/root/miniconda3/bin:${PATH:-}"
 export HF_HOME HF_ENDPOINT PYTHONPATH PYTHONDONTWRITEBYTECODE LANG
 "${JULIA_VOICE_PREFLIGHT:-/opt/julia/bin/julia-voice-preflight}"
 cd "${JULIA_S2S_RUN_ROOT:-/root/julia_voice_v2/run/rmd3g-c1-b18d1e42}"
+mkdir -p /tmp/julia-voice-supervisor
+echo $$ > /tmp/julia-voice-supervisor/s2s.pid
 exec "${JULIA_S2S_PYTHON:-/root/miniconda3/bin/python}" "${JULIA_S2S_CONSOLE:-/root/miniconda3/bin/speech-to-speech}" \
   --mode realtime \
   --ws_host "${S2S_HOST:-0.0.0.0}" --ws_port "${S2S_PORT:-8765}" \
