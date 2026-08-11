@@ -3,7 +3,7 @@ import os, subprocess, sys, time
 interval=int(os.environ.get('JULIA_VOICE_WATCHDOG_INTERVAL','45'))
 fail_threshold=int(os.environ.get('JULIA_VOICE_WATCHDOG_FAILS','3'))
 health=os.environ.get('JULIA_VOICE_HEALTH','/opt/julia/bin/julia-voice-health')
-restart_cmd=os.environ.get('JULIA_VOICE_RESTART_CMD','supervisorctl restart julia-voice')
+pid_file=os.environ.get('JULIA_VOICE_PID_FILE','/tmp/julia-voice-supervisor/s2s.pid')
 fails=0
 while True:
     rc=subprocess.run([health], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True).returncode
@@ -13,7 +13,12 @@ while True:
         fails+=1
         print(f'watchdog health failure {fails}/{fail_threshold}', flush=True)
         if fails>=fail_threshold:
-            print(f'watchdog restarting via: {restart_cmd}', flush=True)
-            subprocess.run(restart_cmd.split(), stdout=subprocess.STDOUT, stderr=subprocess.STDOUT)
+            try:
+                with open(pid_file) as f:
+                    pid=int(f.read().strip())
+                print(f'watchdog terminating unhealthy supervised pid {pid}', flush=True)
+                os.kill(pid, 15)
+            except Exception as e:
+                print(f'watchdog restart request failed: {e}', flush=True)
             fails=0
     time.sleep(interval)
