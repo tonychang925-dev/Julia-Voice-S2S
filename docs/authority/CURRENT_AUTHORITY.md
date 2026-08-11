@@ -43,6 +43,27 @@ Historical failed candidates:
 
 - `5f343195...` / `3a2feaf7...` = HISTORICAL RMD-3G LIVE FAILED CANDIDATE, not production authority.
 
+## CC-1-C2 production E2E failure and source remediation
+
+STATUS: SOURCE REMEDIATION COMMITTED / AWAITING ARTIFACT + DEPLOYMENT
+
+Production evidence superseded the prior CC-1 source IV&V conclusion because the review did not cover the active Voice frontend receiver.
+
+Failure root cause:
+
+- Electron sent `julia.voice.conversation.bind`.
+- Active Voice frontend only handled legacy `julia.voice.workspace.bootstrap` / `flush`.
+- Therefore canonical `conversation_id` did not cross Electron → Voice → S2S.
+
+C2 source authority:
+
+- Voice C2 source commit: `850a94b516ef71d57f74960a8161cc46be7ba03b`
+- Active receiver: `frontend/main.js` handles `julia.voice.conversation.bind` and ACKs `julia.voice.conversation.bound`.
+- S2S transport: `S2sWsRealtimeClient` receives the active canonical `conversationId`.
+- Old workspace bootstrap/flush are legacy compatibility only and must not seed semantic history.
+
+C2 is not production authority until a new deterministic artifact is built, staged, deployed, and runtime-verified.
+
 ## Authoritative deployment docs/code
 
 CANONICAL:
