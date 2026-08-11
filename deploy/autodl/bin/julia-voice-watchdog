@@ -2,14 +2,24 @@
 import os, subprocess, sys, time
 interval=int(os.environ.get('JULIA_VOICE_WATCHDOG_INTERVAL','45'))
 fail_threshold=int(os.environ.get('JULIA_VOICE_WATCHDOG_FAILS','3'))
+startup_grace=int(os.environ.get('JULIA_VOICE_WATCHDOG_STARTUP_GRACE','900'))
 health=os.environ.get('JULIA_VOICE_HEALTH','/opt/julia/bin/julia-voice-health')
 pid_file=os.environ.get('JULIA_VOICE_PID_FILE','/tmp/julia-voice-supervisor/s2s.pid')
 fails=0
+started_at=time.monotonic()
+ready_seen=False
 while True:
     rc=subprocess.run([health], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True).returncode
     if rc==0:
+        if not ready_seen:
+            print('watchdog observed READY; failure counting enabled', flush=True)
+        ready_seen=True
         fails=0
     else:
+        if not ready_seen and time.monotonic() - started_at < startup_grace:
+            print(f'watchdog startup grace: service not READY yet; no restart ({int(time.monotonic()-started_at)}/{startup_grace}s)', flush=True)
+            time.sleep(interval)
+            continue
         fails+=1
         print(f'watchdog health failure {fails}/{fail_threshold}', flush=True)
         if fails>=fail_threshold:
