@@ -336,14 +336,23 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
         optional_kwargs: dict[str, Any],
     ) -> dict[str, Any]:
         metadata = getattr(getattr(runtime_config, "session", None), "metadata", None)
-        if not isinstance(metadata, dict):
+        voice_trace_id = str(optional_kwargs.get("_voice_trace_id", "") or "").strip()
+        conversation_id = ""
+        if isinstance(metadata, dict):
+            conversation_id = str(metadata.get("conversation_id") or "").strip()
+
+        if not voice_trace_id and not conversation_id:
             return optional_kwargs
-        conversation_id = str(metadata.get("conversation_id") or "").strip()
-        if not conversation_id:
-            return optional_kwargs
+
         augmented = dict(optional_kwargs)
+        augmented.pop("_voice_trace_id", None)
         session_extra_body = dict(augmented.get(_SESSION_EXTRA_BODY_KEY) or {})
-        session_extra_body["conversation_id"] = conversation_id
+
+        if voice_trace_id:
+            session_extra_body["voice_trace_id"] = voice_trace_id
+        if conversation_id:
+            session_extra_body["conversation_id"] = conversation_id
+
         augmented[_SESSION_EXTRA_BODY_KEY] = session_extra_body
         return augmented
 

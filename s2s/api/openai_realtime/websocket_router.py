@@ -772,7 +772,13 @@ def create_app(
                             transport.discard_pending_audio()
                         if was_in_response or was_response_pending:
                             if interrupt_enabled:
+                                from_generation = unit.cancel_scope.generation
                                 unit.cancel_scope.cancel()
+                                to_generation = unit.cancel_scope.generation
+                                logger.info(
+                                    "S2S_CANCEL_SIGNAL pipeline=%d from_generation=%s to_generation=%s",
+                                    unit.index, from_generation, to_generation,
+                                )
                                 unit.service._state(session_id).response_pending = False
                                 _flush_queue(unit.output_queue, preserve=_keep_audio_sentinel)
                                 _flush_queue(unit.text_output_queue, preserve=_keep_user_text_event)
