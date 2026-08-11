@@ -34,52 +34,48 @@ test("canonical bootstrap messages never enter delta", () => {
   assert.deepEqual(workspace.exportDelta(), []);
 });
 
-test("cumulative transcript produces one stable turn", () => {
+test("ephemeral transcripts produce stable projection turn ids but no semantic delta", () => {
   const workspace = new VoiceWorkspace({ conversationId: "conv-A", voiceSessionId: "vws-test" });
   workspace.onUserTurnStarted("item-1");
-  workspace.onUserTranscript({ itemId: "item-1", text: "hello", partial: true });
-  workspace.onUserTranscript({ itemId: "item-1", text: "hello Julia", partial: false });
+  const userTurnId = workspace.onUserTranscript({ itemId: "item-1", text: "hello Julia", partial: false });
   workspace.onAssistantTranscript({ responseId: "resp-1", text: "hi" });
-  workspace.onResponseFinished({ responseId: "resp-1", status: "completed", transcript: "hi Tony" });
-  const delta = workspace.exportDelta();
-  assert.equal(delta.length, 1);
-  assert.equal(delta[0].turn_id, "voice:vws-test:0001");
-  assert.equal(delta[0].user_content, "hello Julia");
-  assert.equal(delta[0].assistant_content, "hi Tony");
-  assert.equal(delta[0].assistant_status, "completed");
+  const assistantTurnId = workspace.onResponseFinished({ responseId: "resp-1", status: "completed", transcript: "hi Tony" });
+
+  assert.equal(userTurnId, "voice:vws-test:0001");
+  assert.equal(assistantTurnId, userTurnId);
+  assert.deepEqual(workspace.exportDelta(), []);
 });
 
-test("cancelled assistant is interrupted and retry is stable until commit", () => {
+test("cancelled assistant remains projection-only and never exports external turns", () => {
   const workspace = new VoiceWorkspace({ conversationId: "conv-A", voiceSessionId: "vws-test" });
-  workspace.onUserTranscript({ itemId: "item-1", text: "continue", partial: false });
+  const turnId = workspace.onUserTranscript({ itemId: "item-1", text: "continue", partial: false });
   workspace.onAssistantTranscript({ responseId: "resp-1", text: "part" });
-  workspace.onResponseFinished({ responseId: "resp-1", status: "cancelled", transcript: "partial answer" });
-  const first = workspace.exportDelta();
-  const retry = workspace.exportDelta();
-  assert.deepEqual(retry, first);
-  assert.equal(first[0].assistant_status, "interrupted");
-  workspace.markCommitted([first[0].turn_id], "msg-new");
+  const finished = workspace.onResponseFinished({ responseId: "resp-1", status: "cancelled", transcript: "partial answer" });
+
+  assert.equal(finished, turnId);
+  assert.deepEqual(workspace.exportDelta(), []);
+  workspace.markCommitted([turnId], "msg-new");
   assert.deepEqual(workspace.exportDelta(), []);
   assert.equal(workspace.baseLastMessageId, "msg-new");
 });
 
-test("conversation workspaces remain isolated", () => {
+test("conversation workspaces remain isolated without becoming conversation authority", () => {
   const a = new VoiceWorkspace({ conversationId: "conv-A", voiceSessionId: "a" });
   const b = new VoiceWorkspace({ conversationId: "conv-B", voiceSessionId: "b" });
-  a.onUserTranscript({ itemId: "one", text: "secret", partial: false });
+  const turnA = a.onUserTranscript({ itemId: "one", text: "secret", partial: false });
   a.onResponseFinished({ responseId: "r", status: "completed", transcript: "known" });
-  assert.equal(a.exportDelta().length, 1);
-  assert.equal(b.exportDelta().length, 0);
+
+  assert.equal(turnA, "voice:a:0001");
+  assert.deepEqual(a.exportDelta(), []);
+  assert.deepEqual(b.exportDelta(), []);
 });
 
-test("drain finalizes a user-only turn without inventing an assistant message", () => {
+test("drain is a no-op because Core/CRT is the sole durable authority", () => {
   const workspace = new VoiceWorkspace({ conversationId: "conv-A", voiceSessionId: "drain" });
-  workspace.onUserTranscript({ itemId: "item-1", text: "final question", partial: false });
-  assert.equal(workspace.isStable(), false);
+  const turnId = workspace.onUserTranscript({ itemId: "item-1", text: "final question", partial: false });
+  assert.equal(workspace.isStable(), true);
   workspace.finalizeAfterDrain();
   assert.equal(workspace.isStable(), true);
-  const [turn] = workspace.exportDelta();
-  assert.equal(turn.user_content, "final question");
-  assert.equal(turn.assistant_content, null);
-  assert.equal(turn.assistant_status, null);
+  assert.equal(turnId, "voice:drain:0001");
+  assert.deepEqual(workspace.exportDelta(), []);
 });
