@@ -5,7 +5,7 @@ UPDATED: 2026-08-11
 REPOSITORY: Julia-Voice-S2S
 ROLE: Voice/S2S runtime, AutoDL production release, observability, production supervisor/watchdog
 AUTHORITATIVE BRANCH: phase5/rmd-3g-observability
-AUTHORITATIVE COMMIT AT CLOSEOUT: a5a90803794cdc7e8dd3b3ead534801c7f7bf85b plus this G0 closeout successor commit
+AUTHORITY-DOCUMENT HEAD AT CLOSEOUT: 09373281c6e8342c0728f4c2be54f4c94b9178f4 plus later metadata-only successors
 
 ## Current production/development status
 
@@ -13,7 +13,15 @@ AUTHORITATIVE COMMIT AT CLOSEOUT: a5a90803794cdc7e8dd3b3ead534801c7f7bf85b plus 
 - AutoDL S2S is supervised by dedicated supervisord and watchdog.
 - Manual `python launch_s2s.py` startup is no longer production authority.
 
-## Source and artifact authority
+## Source, artifact, launcher, and document authority
+
+These roles are deliberately separate. REPO HEAD is not automatically SOURCE AUTHORITY, ARTIFACT AUTHORITY, DEPLOYMENT AUTHORITY, or LIVE RUNTIME AUTHORITY.
+
+- AUTHORITY-DOCUMENT HEAD: `09373281c6e8342c0728f4c2be54f4c94b9178f4` plus later metadata-only successors.
+- C1 PRODUCTION SOURCE AUTHORITY: `1552470f3f8f4e33a9cb90181daa1353f0702eb2`.
+- C1 PRODUCTION ARTIFACT AUTHORITY: `b18d1e42ca2e1383829b6d5f0670652efa066944ba92823a815a35253291c9ac`.
+- CANONICAL LAUNCHER AUTHORITY: `90077d209cafcc428e9cb29498e75414973bbac9`, later superseded operationally by supervisor/watchdog commits through `09373281...`.
+- INTERMEDIATE OPS COMMIT: `a5a90803794cdc7e8dd3b3ead534801c7f7bf85b` is historical/intermediate documentation commit, not C1 production source authority and not artifact authority.
 
 C1 source authority:
 
