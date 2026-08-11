@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p /tmp/julia-voice-supervisor /var/log/julia /etc/julia /opt/julia/bin
+CONF="${JULIA_VOICE_SUPERVISOR_CONF:-/etc/supervisor/conf.d/julia-voice.conf}"
+PIDFILE="/tmp/julia-voice-supervisor/supervisord.pid"
+if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+  echo "julia voice supervisord already running pid=$(cat "$PIDFILE")"
+else
+  /usr/bin/supervisord -c "$CONF"
+  echo "julia voice supervisord started"
+fi
