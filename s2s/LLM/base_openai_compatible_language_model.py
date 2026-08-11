@@ -850,12 +850,11 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             active_chat.add_item(make_user_message(f"Please reply to my message in {lang_name}."))
 
         optional_kwargs = self._build_optional_kwargs(req_tools, req_tool_choice)
-        optional_kwargs = self._augment_request_optional_kwargs(runtime_config, optional_kwargs)
-
         # Ephemeral observability trace carrier — value is S2S native turn_id,
         # NOT canonical CRT turn identity. Popped before SDK call downstream.
         if turn_id:
             optional_kwargs["_voice_trace_id"] = turn_id
+        optional_kwargs = self._augment_request_optional_kwargs(runtime_config, optional_kwargs)
 
         # CancelScope.is_stale(gen) is checked when the stream iterator advances; a
         # blocked read inside httpx cannot be aborted by cancel_scope.cancel() from

@@ -81,6 +81,78 @@ def test_inv_abcd_voice_trace_id_is_extra_body_not_turn_id_or_sdk_kwarg():
     assert "_voice_trace_id" not in create.kwargs
 
 
+
+def test_inv_c1_process_orders_trace_before_augmentation_for_strict_sdk_boundary():
+    _alias_package()
+    cm = importlib.import_module("speech_to_speech.LLM.chat_completions_language_model")
+    base = importlib.import_module("speech_to_speech.LLM.base_openai_compatible_language_model")
+    chat_mod = importlib.import_module("speech_to_speech.LLM.chat")
+    msg_mod = importlib.import_module("speech_to_speech.pipeline.messages")
+    rt_mod = importlib.import_module("speech_to_speech.api.openai_realtime.runtime_config")
+
+    class _StrictCreate:
+        kwargs = None
+
+        def create(
+            self,
+            *,
+            model,
+            messages,
+            stream,
+            extra_body,
+            timeout,
+            temperature=None,
+            stream_options=None,
+        ):
+            self.kwargs = {
+                "model": model,
+                "messages": messages,
+                "stream": stream,
+                "extra_body": extra_body,
+                "timeout": timeout,
+                "temperature": temperature,
+                "stream_options": stream_options,
+            }
+            return object()
+
+    create = _StrictCreate()
+    handler = object.__new__(cm.ChatCompletionsApiModelHandler)
+    handler.client = SimpleNamespace(chat=SimpleNamespace(completions=create))
+    handler.model_name = "julia-brain"
+    handler.stream = True
+    handler.request_timeout = None
+    handler.request_timeout_s = 30.0
+    handler._extra_body = None
+    handler.cancel_scope = None
+    handler.speculative_turns = None
+    handler.stream_batch_sentences = 1
+    handler.enable_lang_prompt = False
+    handler.audio_content_type = "input_audio"
+    handler.user_role = "user"
+    handler.compactor = None
+    handler._iter_events = lambda _api_response: iter(())
+
+    runtime_config = rt_mod.RuntimeConfig()
+    runtime_config.session.metadata = {"conversation_id": "conv-c1"}
+    runtime_config.chat.add_item(chat_mod.make_user_message("hello from Tony"))
+    request = msg_mod.GenerateResponseRequest(
+        runtime_config=runtime_config,
+        turn_id="trace-c1",
+        turn_revision=0,
+    )
+
+    outputs = list(handler.process(request))
+
+    assert outputs[-1].error is None
+    assert create.kwargs is not None
+    assert create.kwargs["extra_body"] == {
+        "conversation_id": "conv-c1",
+        "voice_trace_id": "trace-c1",
+    }
+    assert "turn_id" not in create.kwargs["extra_body"]
+    assert "_voice_trace_id" not in create.kwargs
+    assert "voice_trace_id" not in create.kwargs
+
 def test_inv_d_conversation_id_r3a_behavior_unchanged():
     _alias_package()
     cm = importlib.import_module("speech_to_speech.LLM.chat_completions_language_model")
