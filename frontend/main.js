@@ -1757,6 +1757,10 @@ async function handleHostMessage(event) {
       payload = { ...payload, type: "julia.voice.conversation.bind", conversationId };
     }
     if (payload.type === "julia.voice.conversation.bind") {
+      // CC-1-RT1B: reject legacy bind in WAIT_HOST_ATTACH
+      if (_runtimeMode === RTMode.WAIT_HOST_ATTACH) {
+        throw new Error("Voice is waiting for host.attach — conversation.bind is not accepted in this state");
+      }
       const result = await bindCanonicalConversation(payload);
       postToElectron({
         type: "julia.voice.conversation.bound",
