@@ -181,6 +181,16 @@ def _request_chat_completions(
             merged_extra_body.update(session_extra_body)
     if stream:
         create_kwargs["stream_options"] = {"include_usage": True}
+    request_conversation_id = ""
+    request_voice_trace_id = ""
+    if isinstance(merged_extra_body, dict):
+        request_conversation_id = str(merged_extra_body.get("conversation_id") or "").strip()
+        request_voice_trace_id = str(merged_extra_body.get("voice_trace_id") or "").strip()
+    logger.info(
+        "CC1_BRAIN_REQUEST conversation_id=%s voice_trace_id=%s",
+        request_conversation_id or "EMPTY",
+        request_voice_trace_id or "EMPTY",
+    )
     return client.chat.completions.create(
         model=model_name,
         messages=messages,

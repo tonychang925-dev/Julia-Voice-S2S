@@ -56,6 +56,13 @@ logger = logging.getLogger(__name__)
 WARMUP_MAX_RETRIES = 6
 
 
+def _runtime_conversation_id(runtime_config: Any) -> str:
+    metadata = getattr(getattr(runtime_config, "session", None), "metadata", None)
+    if isinstance(metadata, dict):
+        return str(metadata.get("conversation_id") or "").strip()
+    return ""
+
+
 # ── Normalised provider events ────────────────────────────────────────────────
 # Each backend's stream/response is mapped to this small vocabulary so the shared
 # speech-pipeline logic (sentence batching, cancellation, history, token usage)
@@ -602,9 +609,13 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     # would reject this; fail with a clear message instead of an opaque error.
                     error_message = "Cannot generate a response: no instructions and no input were provided."
                 else:
+                    conversation_id = _runtime_conversation_id(turn.runtime_config)
                     logger.info(
-                        "S2S_LLM_REQUEST_START pipeline_index=%s voice_trace_id=%s generation=%s",
-                        pipeline_index, turn.voice_trace_id, turn.gen,
+                        "S2S_LLM_REQUEST_START pipeline_index=%s voice_trace_id=%s generation=%s conversation_id=%s",
+                        pipeline_index,
+                        turn.voice_trace_id,
+                        turn.gen,
+                        conversation_id or "EMPTY",
                     )
                     api_response = (request_fn or self._request)(api_input, optional_kwargs)
                 if api_response is not None:
