@@ -1,7 +1,7 @@
 # Julia-Voice-S2S Current Authority
 
-UPDATED: 2026-08-12
-FROZEN: SOP v1.0
+UPDATED: 2026-08-13
+FROZEN: SOP v1.1
 
 ## Deployment Authority
 
@@ -48,7 +48,16 @@ Specific examples of NON-COMPLIANT:
 
 - Repository: `tonychang925-dev/Julia-Voice-S2S`
 - Branch: `phase5/rmd-3g-observability`
+- Repo HEAD: `315f359`
+- Deployed source: `5c85c4f` (RP-2B turn_id UUID fix)
+- Deployed release: `/root/julia_voice_v2/releases/manual-5c85c4f-20260812_225157`
 - Builder: `scripts/build_s2s_release.py` (deterministic, git-provenance)
+
+## VOICE-C1 Closure
+
+- RC-1 runtime drift → RP-1 provenance gate ✅
+- RC-2 authority cutover → ADR-002 ✅
+- RC-3 turn_id collision → RP-2 UUID uniqueness ✅ (`5c85c4f`)
 
 ## Fault Concealment
 
