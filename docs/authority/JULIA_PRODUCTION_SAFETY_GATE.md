@@ -1,8 +1,9 @@
 # Julia Production Safety Gate (JPSG)
 
-**Status:** ACTIVE
+**Status:** FROZEN v1.0
 **Effective:** 2026-08-12
 **Applies to:** All Julia runtime component deployments and protocol changes
+**Governance:** SOP v1.1 (deployment) + JPSG v1.0 (safety gate)
 
 ## Principle
 
@@ -34,10 +35,11 @@ Any failure: STOP. Do not proceed to next state.
 Every component must answer "who am I" on startup:
 
 ```
-COMPONENT=<name> GIT_SHA=<sha> PATH=<release_path>
+COMPONENT=<name> GIT_SHA=<sha> BUILD_ID=<uuid> BUILD_TIME=<timestamp> PATH=<release_path>
 ```
 
-If absent: STARTUP BLOCKED.
+Two environments with same SHA but different deps/models/config are different runtimes.
+If any field absent: STARTUP BLOCKED.
 
 ### G0.2 Three-Way Consistency
 
@@ -101,6 +103,17 @@ MODEL_CONFIG_HASH=$(sha256sum model_config.json 2>/dev/null || echo "N/A")
 ```
 
 Store in manifest or runtime attestation. Changes to environment must be reviewed — not just code changes.
+
+### G0.9 Data Schema Compatibility (FUTURE)
+
+When Conversation/Memory/Context schemas are versioned, this gate activates.
+
+```
+ConversationSchema=v1.2  MemorySchema=v1.0  ContextSchema=v1.0
+```
+
+Schema mismatch between components: STARTUP BLOCKED.
+Prevents silent data corruption from schema drift.
 
 ---
 
