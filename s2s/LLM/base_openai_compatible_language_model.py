@@ -630,19 +630,9 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     self.request_timeout_s,
                 )
                 close_reason = "error" if not self._generation_is_stale(turn.gen) else "stale_cancel"
-                if not self._generation_is_stale(turn.gen) and self._turn_output_allowed(
-                    turn.turn_id, turn.turn_revision
-                ):
-                    # Canned apology carries no language_code (mirrors the prior handlers).
-                    yield LLMResponseChunk(
-                        text="Wow I'm a bit slow today, could you repeat that?",
-                        runtime_config=turn.runtime_config,
-                        response=turn.response,
-                        turn_id=turn.turn_id,
-                        turn_revision=turn.turn_revision,
-                        speech_stopped_at_s=turn.speech_stopped_at_s,
-                        cancel_generation=turn.gen,
-                    )
+                # CM-FAILCLOSED: removed canned apology. Timeout produces error, not fake assistant text.
+                if error_message is None:
+                    error_message = f"OpenAI API read timed out after {self.request_timeout_s:.1f}s"
             except GeneratorExit:
                 close_reason = "consumer_close"
                 raise
