@@ -1739,9 +1739,10 @@ async function bootstrapVoiceWorkspace(payload) {
 }
 
 async function handleHostMessage(event) {
-  const payload = event.data;
-  if (!assertHostMessage(event, payload)) return;
-  const requestId = String(payload.requestId || "");
+  const incoming = event.data;
+  if (!assertHostMessage(event, incoming)) return;
+  const requestId = String(incoming.requestId || "");
+  let payload = incoming;
   try {
     if (payload.type === "julia.voice.host.attach") {
       // CC-1-RT1: Explicit Host Handshake
@@ -1754,7 +1755,7 @@ async function handleHostMessage(event) {
       if (workspacePhase === "WAIT_HOST_ATTACH") workspacePhase = "HOSTED_BOUND";
       _hostAttachResolve(conversationId);
       // Chain into conversation.bind with the same conversation_id
-      payload = { ...payload, type: "julia.voice.conversation.bind", conversationId };
+      payload = { ...incoming, type: "julia.voice.conversation.bind", conversationId };
     }
     if (payload.type === "julia.voice.conversation.bind") {
       // CC-1-RT1B: reject legacy bind in WAIT_HOST_ATTACH
