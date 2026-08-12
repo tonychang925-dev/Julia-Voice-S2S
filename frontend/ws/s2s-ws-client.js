@@ -55,6 +55,9 @@
  *   to greet once after the initial session configuration is sent.
  * @property {string} [conversationId] Canonical Core conversation identity for
  *   Julia-bound realtime sessions. This is identifier-only; never history.
+ * @property {boolean} [canonicalConversationRequired] Fail closed if the
+ *   realtime session would start without conversationId. Electron-hosted CC-1
+ *   sessions set this so Voice cannot fall back to a standalone history path.
  * @property {MediaStream} [micStream] Live mic stream. Provide this OR `acquireMic`.
  * @property {() => Promise<MediaStream>} [acquireMic] Lazily obtain the mic stream,
  *   called only once a session is actually granted (after any queue wait). Lets the
@@ -210,11 +213,21 @@ export class S2sWsRealtimeClient extends EventTarget {
     this._sessionConfigured = false;
     this._startupGreeting = options.startupGreeting?.trim() ?? "";
     this._startupGreetingSent = false;
-    this._conversationId = options.conversationId ?? "";
+    this._canonicalConversationRequired = options.canonicalConversationRequired === true;
+    this._conversationId = String(options.conversationId ?? "").trim();
+    if (this._canonicalConversationRequired && !this._conversationId) {
+      throw new Error("Canonical conversation_id is required for this Voice session");
+    }
+    this._configuredConversationId = "";
     this._deferMicCapture = options.deferMicCapture === true;
-    /** @type {(() => void) | null} */
+    /** @type {((conversationId: string) => void) | null} */
     this._configuredResolve = null;
-    this._configuredPromise = new Promise((resolve) => { this._configuredResolve = resolve; });
+    /** @type {((err: Error) => void) | null} */
+    this._configuredReject = null;
+    this._configuredPromise = new Promise((resolve, reject) => {
+      this._configuredResolve = resolve;
+      this._configuredReject = reject;
+    });
     /** @type {Array<{ resolve: (value: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>} */
     this._pendingItemCreates = [];
     // Bounded, browser-local copy of the exact PCM frames sent over this
@@ -255,6 +268,18 @@ export class S2sWsRealtimeClient extends EventTarget {
    * ready to send/receive samples.
    * @returns {Promise<void>}
    */
+  get conversationId() {
+    return this._conversationId;
+  }
+
+  get configuredConversationId() {
+    return this._configuredConversationId;
+  }
+
+  waitUntilConfigured() {
+    return this._configuredPromise;
+  }
+
   async connect() {
     if (this._ws) throw new Error("Already connected");
 
@@ -676,10 +701,23 @@ export class S2sWsRealtimeClient extends EventTarget {
         // Server-side defaults for the s2s pipeline are already what we
         // want (server_vad, whisper-1 transcription, PCM16 16k in / 24k
         // out). We only push the user-tunable bits: voice + instructions.
-        this._sendSessionUpdate();
-        this._sessionConfigured = true;
-        this._configuredResolve?.();
-        this._configuredResolve = null;
+        try {
+          const configuredConversationId = this._sendSessionUpdate();
+          this._sessionConfigured = true;
+          this._configuredConversationId = configuredConversationId;
+          this._configuredResolve?.(configuredConversationId);
+          this._configuredResolve = null;
+          this._configuredReject = null;
+        } catch (err) {
+          const error = err instanceof Error ? err : new Error(String(err));
+          this._configuredReject?.(error);
+          this._configuredResolve = null;
+          this._configuredReject = null;
+          this.dispatchEvent(new CustomEvent("error", { detail: { error } }));
+          this._setStatus("error");
+          try { this._ws?.close(); } catch {}
+          break;
+        }
         // The s2s server does not echo session.updated. WebSocket messages are
         // ordered, so this hidden item and response.create are handled only
         // after the session.update sent immediately above.
@@ -972,6 +1010,20 @@ export class S2sWsRealtimeClient extends EventTarget {
     }
   }
 
+  _attachCanonicalMetadata(session) {
+    const conversationId = String(this._conversationId || "").trim();
+    if (this._canonicalConversationRequired && !conversationId) {
+      throw new Error("Canonical conversation_id is required before session.update");
+    }
+    if (conversationId) {
+      session.metadata = { conversation_id: conversationId };
+    }
+    if (this._canonicalConversationRequired && session.metadata?.conversation_id !== conversationId) {
+      throw new Error("session.update canonical conversation_id mismatch");
+    }
+    return conversationId;
+  }
+
   _sendSessionUpdate() {
     // Minimal payload: only the bits the user is allowed to configure.
     // The s2s server already defaults to server_vad, whisper-1
@@ -988,10 +1040,7 @@ export class S2sWsRealtimeClient extends EventTarget {
         output: { voice: this.options.voice },
       },
     };
-    const conversationId = String(this._conversationId || "").trim();
-    if (conversationId) {
-      session.metadata = { conversation_id: conversationId };
-    }
+    const conversationId = this._attachCanonicalMetadata(session);
     // Tools are declared here; the backend already accepts them in
     // session.update and emits response.function_call_arguments.done when the
     // model decides to call one. Only include the keys when we actually have
@@ -1001,6 +1050,7 @@ export class S2sWsRealtimeClient extends EventTarget {
       session.tool_choice = "auto";
     }
     this._send({ type: "session.update", session });
+    return conversationId;
   }
 
   /** Update voice/instructions on a live session without tearing down. */
@@ -1011,6 +1061,7 @@ export class S2sWsRealtimeClient extends EventTarget {
     if (patch.instructions) session.instructions = patch.instructions;
     if (patch.voice) session.audio = { output: { voice: patch.voice } };
     if (Object.keys(session).length > 1) {
+      this._attachCanonicalMetadata(session);
       this._send({ type: "session.update", session });
     }
   }
@@ -1023,9 +1074,11 @@ export class S2sWsRealtimeClient extends EventTarget {
    */
   setTools(tools) {
     this._tools = tools;
+    const session = { type: "realtime", tools, tool_choice: tools.length ? "auto" : "none" };
+    this._attachCanonicalMetadata(session);
     this._send({
       type: "session.update",
-      session: { type: "realtime", tools, tool_choice: tools.length ? "auto" : "none" },
+      session,
     });
   }
 

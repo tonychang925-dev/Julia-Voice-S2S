@@ -1304,6 +1304,20 @@ function stopJoinCountdown() {
  * created here, which is still inside the gesture for a direct orb tap.
  * @param {AudioContext | null} [audioContext]
  */
+
+function requireActiveCanonicalConversationId() {
+  const conversationId = String(activeCanonicalConversationId || "").trim();
+  if (!conversationId) {
+    throw new Error("Electron-hosted Voice requires canonical conversation binding before S2S start");
+  }
+  return conversationId;
+}
+
+function s2sConversationIdForStart() {
+  if (electronHosted) return requireActiveCanonicalConversationId();
+  return String(activeCanonicalConversationId || voiceWorkspace?.conversationId || "").trim();
+}
+
 async function doStart(audioContext = null, options = {}) {
   // Resolve the target before touching mic/audio so a misconfiguration (e.g.
   // direct mode with no URL) fails fast with a clear message.
@@ -1338,9 +1352,11 @@ async function doStart(audioContext = null, options = {}) {
   // The webcam is started on arrival (autoStartCamera), so nothing to do here;
   // a still-pending grant just means the snapshot tool isn't ready yet.
 
+  const requiredConversationId = s2sConversationIdForStart();
   const c = new S2sWsRealtimeClient({
     ...target,
-    conversationId: activeCanonicalConversationId || voiceWorkspace?.conversationId || "",
+    conversationId: requiredConversationId,
+    canonicalConversationRequired: electronHosted,
     voice: settings.voice,
     instructions: effectiveInstructions(),
     startupGreeting: electronHosted ? "" : startupGreeting,
@@ -1474,8 +1490,15 @@ async function doStart(audioContext = null, options = {}) {
 
   try {
     await c.connect();
+    if (options.waitForSessionConfigured === true) {
+      const configuredConversationId = await c.waitUntilConfigured();
+      if (electronHosted && configuredConversationId !== requiredConversationId) {
+        throw new Error(`Voice session configured another conversation: ${configuredConversationId || "EMPTY"} != ${requiredConversationId}`);
+      }
+    }
     // VC-03: No conversation history seeding. Core is sole authority.
     // S2S is media transport only. Brain/Core provide context.
+    return c;
   } catch (err) {
     // The grant can be refused (402 → limit) or the dial can fail. In LB mode
     // the AudioContext hasn't been adopted by the client yet (the session POST
@@ -1668,7 +1691,12 @@ async function bindCanonicalConversation(payload) {
   if (Array.isArray(payload.messages) && payload.messages.length) {
     throw new Error("CC-1 bind must not carry message history");
   }
-  if (activeCanonicalConversationId === conversationId && voiceWorkspace?.conversationId === conversationId) {
+  if (
+    activeCanonicalConversationId === conversationId
+    && voiceWorkspace?.conversationId === conversationId
+    && client?.conversationId === conversationId
+    && client?.configuredConversationId === conversationId
+  ) {
     return {
       conversationId,
       voiceSessionId: voiceWorkspace.voiceSessionId,
@@ -1681,7 +1709,11 @@ async function bindCanonicalConversation(payload) {
   activeCanonicalConversationId = conversationId;
   voiceWorkspace = new VoiceWorkspace({ conversationId });
   // CC-1-C2: bind is transport identity only. Do not seed copied history.
-  await doStart(null, { deferMicCapture: true, preserveCanonicalView: true });
+  await doStart(null, {
+    deferMicCapture: true,
+    preserveCanonicalView: true,
+    waitForSessionConfigured: true,
+  });
   workspacePhase = "READY";
   return {
     conversationId,
