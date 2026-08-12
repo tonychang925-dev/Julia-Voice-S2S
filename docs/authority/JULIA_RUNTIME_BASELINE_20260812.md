@@ -1,65 +1,55 @@
-# JULIA RUNTIME BASELINE CHECKPOINT — 2026-08-12
+# JULIA RUNTIME BASELINE — 2026-08-12
 
 **Status:** FROZEN
-**Scope:** All components verified working together
-**Rule:** Any deployment must match these SHAs or be explicitly approved
+**Verified:** 2026-08-12 19:15 CST
+**Rule:** Deployment must match these SHAs or pass JPSG Gate 0 + Gate 1
 
-## Repo Versions
+## Component Versions
 
-| Component | Repo | Branch | SHA |
-|---|---|---|---|
-| Voice/S2S | Julia-Voice-S2S | phase5/rmd-3g-observability | `25497cd` |
-| Electron | Julia_client | codex/bugfix/electron-c10-c11-projection | `3f8bca0` |
-| Core/CRT | Julia_core | cm-r0-fix | `5439e99` |
-| Brain | julia_ai_assistant_rmd3g_prod | (detached) | `bbd90af` |
+| Component | Repo | Branch | SHA | Role |
+|---|---|---|---|---|
+| Voice/S2S (server) | Julia-Voice-S2S | phase5/rmd-3g-observability | `e2b2a28` | Voice runtime |
+| Voice/S2S (github) | Julia-Voice-S2S | phase5/rmd-3g-observability | `e6168da` | Docs + launcher |
+| Electron | Julia_client | codex/bugfix/electron-c10-c11-projection | `3f8bca0` | Desktop shell |
+| Core/CRT | Julia_core | cm-r0-fix | `5439e99` | Conversation authority |
+| Brain | julia_ai_assistant_rmd3g_prod | (detached) | `bbd90af` | Voice API bridge |
 
-## Server (AutoDL) Runtime
+Note: GitHub Voice-S2S `e6168da` is ahead of server `e2b2a28` by docs + launcher fix only. The s2s/frontend runtime code is identical.
 
-| Component | PID | Path | SHA |
-|---|---|---|---|
-| S2S :8765 | 104073 | manual-25497cd-20260812_175124/release | `25497cd` |
-| Frontend :7860 | 103904 | manual-25497cd-20260812_175124/release/frontend | `25497cd` |
+## Server Runtime (AutoDL)
+
+```
+Release:       manual-e2b2a28-20260812_135217
+Manifest SHA:  e2b2a28
+S2S PID:       109973
+S2S PYTHONPATH: /root/julia_voice_v2/releases/current/release ✅
+Frontend:      :7860 ✅
+S2S:           :8765 ✅
+CC1_SESSION_UPDATE: ✅ conversation_id flowing
+```
 
 ## Mac Runtime
 
-| Component | PID | Status |
-|---|---|---|
-| Brain :18089 | 21424 | CRT commit: ✅ |
-| Electron | running | Host bind + CC-2 cache: ✅ |
+```
+Brain PID:     21424
+Brain port:    :18089 ✅
+CRT commit:    ✅
+Electron:      running ✅
+```
 
 ## Verified Capabilities
 
-- [x] Voice → Text display (CRT sync)
-- [x] Text → Voice (workspace.bootstrap)
-- [x] Canonical conversation_id propagation (S2S → Brain → CRT)
-- [x] CRT voice turn persistence (turn_id, modality, status)
-- [x] Electron host.attach / workspace.bootstrap
-- [x] Voice prompt: Chinese parenthetical descriptions blocked (`25497cd`)
+- [x] Voice realtime (S2S → Brain → LLM → TTS)
+- [x] Text mode (Electron → Brain → CRT)
+- [x] Voice → Text sync (CRT commit → Electron sync)
+- [x] Conversation context (workspace.bootstrap → CRT history → LLM)
+- [x] CC1 canonical conversation_id propagation (S2S → Brain)
+- [x] CRT turn persistence (turn_id, modality, status, source)
+- [x] S2S import provenance fail-closed (G0.7)
+- [x] Dual review safety gate (JPSG documented)
 
-## Key Fixes in This Baseline
+## Known Gaps
 
-1. `e2b2a28`: const reassignment fix (handleHostMessage)
-2. Electron `b5ed986`: workspace.bootstrap restoration
-3. Core `f3d41f6`: CRT turn_id/modality/status to_dict whitelist
-4. Brain `bbd90af`: nested conversation_id + turn_id generation
-5. Electron `ec83805`: filter accepts null/empty turn_id
-6. Electron `3f8bca0`: CC-2 Phase 1 VoiceSessionCache
-7. `25497cd`: voice prompt Chinese parenthetical ban
-8. Core `5439e99`: Message.source + Session.summary_status (Memory Foundation)
-
-## Test Evidence
-
-```
-Voice → S2S → Brain → CRT: ✅
-CRT → Electron text sync: ✅
-Conversation context: ✅ (workspace.bootstrap restores history)
-Voice clone (ref_text): ✅ (17-char Chinese baseline preserved)
-```
-
-## Three-Way Consistency
-
-```
-GitHub Voice-S2S:  25497cd ✅
-Mac local:         25497cd ✅
-Server running:    25497cd ✅
-```
+- Voice prompt: parenthetical descriptions not yet suppressed (fix in `02b941a`, not deployed)
+- Server GitHub Voice-S2S is ahead by docs + launcher fix — non-runtime
+- CC-2 VoiceSessionCache Phase 1 deployed (Electron `3f8bca0`) — minimal MVP
