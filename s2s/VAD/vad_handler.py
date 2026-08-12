@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from queue import Queue
@@ -206,7 +207,11 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
     def _start_new_turn(self) -> tuple[str, int]:
         self._cancel_pending_reopen()
         self._turn_counter += 1
-        self._current_turn_id = f"turn_{self._turn_counter}"
+        # RP-2B: canonical turn_id must be globally unique across S2S reconnects.
+        # A per-session counter (turn_1, turn_2, ...) resets on reconnect and
+        # collides with historical CRT turns, causing Brain idempotency to replay
+        # old assistant responses. Use a UUID for stable, unique identity.
+        self._current_turn_id = f"turn_{uuid.uuid4().hex}"
         self._current_turn_revision = 0
         self._speculative_audio_prefix = None
         self._speculative_raw_audio_prefix = None
