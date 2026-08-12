@@ -31,15 +31,40 @@ S2S_DIR = REPO_ROOT / "s2s"
 FRONTEND_DIR = REPO_ROOT / "frontend"
 
 
-def git_commit() -> str:
-    return subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True
-    ).strip()
+def verify_remote_commit(commit: str) -> None:
+    """Verify commit exists on remote. Fails if not pushed."""
+    result = subprocess.run(
+        ["git", "branch", "-r", "--contains", commit],
+        cwd=REPO_ROOT, capture_output=True, text=True
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        raise RuntimeError(f"Commit {commit[:12]} not found on any remote branch — push first")
 
 
-def build_artifact(output_dir: Path) -> tuple[Path, dict]:
-    """Build the deterministic release artifact. Returns (archive_path, manifest)."""
-    commit = git_commit()
+def materialize_from_commit(commit: str, target_dir: Path) -> None:
+    """Extract s2s/ and frontend/ from exact git commit object. Ambient working tree irrelevant."""
+    with tempfile.TemporaryDirectory(prefix="rcp_src_") as src_tmp:
+        src = Path(src_tmp)
+        subprocess.run(
+            ["git", "clone", "--depth", "1", "--no-checkout", str(REPO_ROOT), str(src)],
+            check=True, capture_output=True
+        )
+        subprocess.run(["git", "checkout", commit], cwd=src, check=True, capture_output=True)
+        shutil.copytree(src / "s2s", target_dir / "speech_to_speech", symlinks=False)
+        shutil.copytree(src / "frontend", target_dir / "frontend", symlinks=False)
+
+
+def build_artifact(output_dir: Path, commit: str | None = None) -> tuple[Path, dict]:
+    """Build deterministic release from EXACT git commit (must be pushed to remote).
+    Ambient working tree is NEVER read. Only git commit object matters.
+    """
+    if commit is None:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True
+        ).strip()
+
+    verify_remote_commit(commit)
+
     commit_short = commit[:7]
     archive_name = f"speech_to_speech-obs-{commit_short}.tar.gz"
     archive_path = output_dir / archive_name
@@ -48,10 +73,9 @@ def build_artifact(output_dir: Path) -> tuple[Path, dict]:
 
     with tempfile.TemporaryDirectory(prefix="s2s_build_") as tmp:
         tmpdir = Path(tmp)
+        materialize_from_commit(commit, tmpdir)
         pkg_dir = tmpdir / "speech_to_speech"
         frontend_dir = tmpdir / "frontend"
-        shutil.copytree(S2S_DIR, pkg_dir, symlinks=False)
-        shutil.copytree(FRONTEND_DIR, frontend_dir, symlinks=False)
 
         # ---- Deterministic metadata ----
         FIXED_MTIME = 1758076800  # 2026-08-11 00:00:00 UTC
