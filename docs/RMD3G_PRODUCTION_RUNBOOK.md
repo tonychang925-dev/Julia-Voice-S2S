@@ -1,36 +1,64 @@
-# Julia Voice RMD-3G Production Runbook
+# Julia Voice RCP Production Runbook
 
 Last updated: 2026-08-11
 
-This runbook describes the current production operation model for Julia Voice S2S on AutoDL after RMD-3G C1 recovery.
+This runbook describes the current production operation model for Julia Voice S2S + Frontend on AutoDL under RCP (Release Control Plane).
 
 ## 1. Current production authority
 
-### Voice / S2S
+### RCP: Unified Release (CANONICAL)
 
-- Source authority: `1552470f3f8f4e33a9cb90181daa1353f0702eb2`
-- Artifact authority: `b18d1e42ca2e1383829b6d5f0670652efa066944ba92823a815a35253291c9ac`
-- Immutable release: `/root/julia_voice_v2/releases/rmd3g-c1-b18d1e42`
-- Release import root: `/root/julia_voice_v2/releases/rmd3g-c1-b18d1e42/release`
+RCP replaces the split-release RMD3G model. Frontend (:7860) and S2S (:8765) are deployed from a SINGLE immutable artifact. Split-brain deployment is structurally impossible.
+
+- Build authority: `scripts/build_s2s_release.py` (deterministic, git-provenance)
+- Activation authority: `deploy/autodl/bin/julia-release-activate` (atomic current symlink)
+- Verification authority: `deploy/autodl/bin/julia-runtime-attest` (runtime attestation gate)
+- Source branch: `codex/bugfix/workbench-intelligence-binding`
+- Release root: `/root/julia_voice_v2/releases/current`
+- Run root: `/root/julia_voice_v2/run/current`
 - Target Python: `/root/miniconda3/bin/python`
-- Service port: `0.0.0.0:8765`
+- S2S port: `0.0.0.0:8765`
+- Frontend port: `0.0.0.0:7860`
 - Realtime endpoint: `ws://<server>:8765/v1/realtime`
 
-Critical runtime file hashes:
+### Release structure
 
-| File | SHA256 |
-|---|---|
-| `speech_to_speech/LLM/base_openai_compatible_language_model.py` | `2f904a05128d5b11c92e6a2bd04769cd12c6e06f3a66e7d23dbb09b7eb34004c` |
-| `speech_to_speech/LLM/chat_completions_language_model.py` | `725db87b6313a2cc601173be751ea8bca258eb2c601450ac4a0e273f92acb621` |
-| `speech_to_speech/api/openai_realtime/websocket_router.py` | `12769ece09b8da10f6ea7be06064cb37dc58d8a41026d8d47bfe1d6ecd0c033c` |
+```
+/root/julia_voice_v2/releases/
+├── current → speech_to_speech-obs-<hash>/   (atomic symlink)
+├── .previous                                  (rollback target)
+└── speech_to_speech-obs-<hash>/
+    ├── manifest.json                          (complete file manifest with SHA256)
+    ├── speech_to_speech-obs-<hash>.tar.gz     (sealed archive)
+    └── release/                               (PYTHONPATH — extracted archive)
+        ├── speech_to_speech/                  (S2S code)
+        └── frontend/                          (served by :7860)
+```
 
-### Brain
+### Build provenance chain
 
-- Brain authority: `9c8764af35c702a60d778b2148846d7728794f30`
-- Runtime endpoint used by S2S: `http://127.0.0.1:8089/v1`
-- Current bridge: AutoDL local `:8089` reaches Brain `:18089` through SSH tunnel.
+```
+SOURCE COMMIT (remote, pushed)
+  → build_s2s_release.py (reads exact git commit, never ambient worktree)
+  → speech_to_speech-obs-<hash>.tar.gz (deterministic, reproducible)
+  → manifest.json (SHA256 of every file)
+```
 
-Note: Brain runtime convergence should be verified separately by loaded module path/SHA, not only by repository HEAD.
+### Deployment chain
+
+```
+ARTIFACT → Extract → julia-release-activate (read-only seal, atomic symlink)
+  → supervisor restarts from current/
+  → julia-runtime-attest (PID bytes vs manifest — ALL SAME = YES)
+```
+
+### Key invariants
+
+1. CODE → GIT → ARTIFACT → SERVER → PID must ALL match
+2. Same release root for :7860 and :8765 — split-brain structurally prevented
+3. Releases are content-addressed, immutable after seal
+4. Atomic `current` symlink swap — no partial deploys
+5. Runtime attestation gate must PASS before any E2E testing
 
 ## 2. External runtime assets
 
@@ -57,27 +85,29 @@ Version-controlled templates live under `deploy/autodl/` and are deployed to Aut
 | `deploy/autodl/bin/julia-voice-health` | `/opt/julia/bin/julia-voice-health` | Local readiness check |
 | `deploy/autodl/bin/julia-voice-watchdog` | `/opt/julia/bin/julia-voice-watchdog` | Health watchdog; terminates unhealthy supervised S2S PID |
 | `deploy/autodl/bin/bootstrap-julia-voice-supervisor` | `/opt/julia/bin/bootstrap-julia-voice-supervisor` | Detached supervisor bootstrap |
+| `deploy/autodl/bin/julia-release-activate` | `/opt/julia/bin/julia-release-activate` | Atomic release activation (symlink swap, read-only seal) |
+| `deploy/autodl/bin/julia-runtime-attest` | `/opt/julia/bin/julia-runtime-attest` | Runtime attestation gate (PID bytes vs manifest) |
 | `deploy/autodl/supervisor/julia-voice.conf` | `/etc/supervisor/conf.d/julia-voice.conf` | Process supervisor config |
 | `deploy/autodl/boot.sh` | `/root/boot.sh`, `/root/autodl_boot.sh` | AutoDL boot hook |
+| `deploy/autodl/start_frontend.sh` | `/opt/julia/bin/start-julia-frontend` | :7860 frontend launcher |
 
 Do not edit these files directly on the server except during an approved deployment from the version-controlled repo.
 
 ## 4. Canonical environment
 
-Production environment is defined by `/etc/julia/julia-voice.env`.
-
-Required values include:
+Production environment is defined by `/etc/julia/julia-voice.env`. Under RCP, this file is generated by `julia-release-activate` and uses the `current` symlink:
 
 ```bash
-JULIA_S2S_RELEASE_ROOT=/root/julia_voice_v2/releases/rmd3g-c1-b18d1e42
-JULIA_S2S_RUN_ROOT=/root/julia_voice_v2/run/rmd3g-c1-b18d1e42
+JULIA_S2S_CURRENT=/root/julia_voice_v2/releases/current
+JULIA_S2S_RUN_ROOT=/root/julia_voice_v2/run/current
+JULIA_S2S_LOG=/root/julia_voice_v2/run/current/s2s.log
 JULIA_S2S_PYTHON=/root/miniconda3/bin/python
 JULIA_S2S_CONSOLE=/root/miniconda3/bin/speech-to-speech
 
 HF_HOME=/root/autodl-tmp/huggingface
 HF_ENDPOINT=https://hf-mirror.com
 PYTHONDONTWRITEBYTECODE=1
-PYTHONPATH=/root/julia_voice_v2/releases/rmd3g-c1-b18d1e42/release
+PYTHONPATH=/root/julia_voice_v2/releases/current/release
 LANG=en_US.UTF-8
 
 BRAIN_BASE_URL=http://127.0.0.1:8089/v1
@@ -100,21 +130,56 @@ Expected process tree:
 
 ```text
 supervisord
-├── /root/miniconda3/bin/python /root/miniconda3/bin/speech-to-speech ...
-└── /root/miniconda3/bin/python3 /opt/julia/bin/julia-voice-watchdog
+├── /root/miniconda3/bin/python /root/miniconda3/bin/speech-to-speech ...   (:8765 S2S)
+├── /root/miniconda3/bin/python3 /opt/julia/bin/julia-voice-watchdog        (watchdog)
+└── /root/miniconda3/bin/python -m uvicorn server:app ...                   (:7860 frontend)
 ```
 
 Key behavior:
 
 - S2S process death: supervisor restarts it.
 - S2S alive but unhealthy: watchdog observes health failures and terminates the supervised S2S PID; supervisor restarts it.
+- Frontend process (:7860) is also supervisor-managed.
 - Watchdog does not spawn S2S directly.
-- Exactly one process may own `:8765`.
+- Exactly one process may own `:8765`; exactly one may own `:7860`.
 - Qwen3-TTS cold initialization may take 10+ minutes.
 - Watchdog startup grace: `900s`.
 - Supervisor `startsecs`: `900s`.
 
-## 6. Normal operations
+## 6. Runtime attestation (NEW — RCP gate)
+
+After any deployment or restart, run the attestation gate:
+
+```bash
+/opt/julia/bin/julia-runtime-attest
+```
+
+This verifies:
+- :7860 cwd in current release
+- :7860 served main.js SHA matches manifest
+- :7860 served s2s-ws-client.js SHA matches manifest
+- :8765 PYTHONPATH in current/release
+- :8765 health = READY
+- No stale processes
+
+Expected output:
+
+```text
+=== RUNTIME ATTESTATION ===
+release: /root/julia_voice_v2/releases/speech_to_speech-obs-<hash>
+  ✅ :7860 cwd in current
+  ✅ :7860 served main.js
+  ✅ :7860 disk main.js
+  ✅ :7860 served s2s-ws-client.js
+  ✅ :8765 PYTHONPATH in current
+  ✅ :8765 health
+  ✅ stale processes
+✅ RUNTIME ATTESTATION: PASS
+```
+
+ANY mismatch → FAIL. Do not proceed to E2E testing on FAIL.
+
+## 7. Normal operations
 
 ### Connect to AutoDL
 
@@ -137,7 +202,7 @@ READY
 ### Check process status
 
 ```bash
-ps -ef | grep -E 'julia-voice|speech-to-speech|supervisord' | grep -v grep
+ps -ef | grep -E 'julia-voice|speech-to-speech|supervisord|uvicorn' | grep -v grep
 cat /tmp/julia-voice-supervisor/supervisord.pid
 cat /tmp/julia-voice-supervisor/s2s.pid
 ```
@@ -145,31 +210,17 @@ cat /tmp/julia-voice-supervisor/s2s.pid
 Expected:
 
 - one dedicated supervisord process using `/etc/supervisor/conf.d/julia-voice.conf`
-- one S2S process
+- one S2S process (:8765)
+- one frontend uvicorn process (:7860)
 - one watchdog process
 
-### Check port owner
+### Check port owners
 
 ```bash
-/root/miniconda3/bin/python3 - <<'PY'
-import os
-owners=[]
-for line in open('/proc/net/tcp'):
-    p=line.split()
-    if len(p)>9 and p[1].endswith(':223D') and p[3]=='0A':
-        inode=p[9]
-        for pid in filter(str.isdigit, os.listdir('/proc')):
-            try: fds=os.listdir(f'/proc/{pid}/fd')
-            except Exception: continue
-            for fd in fds:
-                try: t=os.readlink(f'/proc/{pid}/fd/{fd}')
-                except Exception: continue
-                if t==f'socket:[{inode}]': owners.append((pid, fd, inode))
-print(owners)
-PY
+ss -tlnp | grep -E '8765|7860'
 ```
 
-Expected: exactly one owner, matching `/tmp/julia-voice-supervisor/s2s.pid`.
+Expected: `:8765` owned by S2S PID, `:7860` owned by uvicorn PID.
 
 ### Start supervisor manually if boot hook did not run
 
@@ -177,7 +228,7 @@ Expected: exactly one owner, matching `/tmp/julia-voice-supervisor/s2s.pid`.
 /opt/julia/bin/bootstrap-julia-voice-supervisor
 ```
 
-This starts the supervisor detached. Do not manually run `speech-to-speech`.
+This starts the supervisor detached. Do not manually run `speech-to-speech` or `uvicorn`.
 
 ### Stop Julia Voice cleanly
 
@@ -185,7 +236,7 @@ This starts the supervisor detached. Do not manually run `speech-to-speech`.
 kill "$(cat /tmp/julia-voice-supervisor/supervisord.pid)"
 ```
 
-This stops the dedicated supervisor and its managed S2S/watchdog processes.
+This stops the dedicated supervisor and its managed S2S/watchdog/frontend processes.
 
 ### Restart Julia Voice cleanly
 
@@ -204,16 +255,62 @@ while true; do date; /opt/julia/bin/julia-voice-health && break; sleep 30; done
 
 Do not treat `UNHEALTHY ConnectionRefusedError` during the first several minutes as failure; cold model initialization can take 10+ minutes.
 
-## 7. Logs
+## 8. Deployment: Activating a new RCP release
+
+### Build (on Mac)
+
+```bash
+cd /Users/admin/Julia-Voice-S2S
+python3 scripts/build_s2s_release.py /tmp/s2s_rcp
+```
+
+### Transfer to AutoDL
+
+```bash
+scp -i /Users/admin/.ssh/autodl_ed25519.BACKUP -P 42819 \
+  /tmp/s2s_rcp/speech_to_speech-obs-*.tar.gz \
+  /tmp/s2s_rcp/manifest.json \
+  root@connect.nmb2.seetacloud.com:/tmp/
+```
+
+### Extract and activate (on AutoDL)
+
+```bash
+# Extract
+ARCHIVE_NAME="speech_to_speech-obs-<hash>"
+mkdir -p /root/julia_voice_v2/releases/${ARCHIVE_NAME}/release
+cd /root/julia_voice_v2/releases/${ARCHIVE_NAME}/release
+tar xzf /tmp/${ARCHIVE_NAME}.tar.gz
+cp /tmp/manifest.json /root/julia_voice_v2/releases/${ARCHIVE_NAME}/
+cp /tmp/${ARCHIVE_NAME}.tar.gz /root/julia_voice_v2/releases/${ARCHIVE_NAME}/
+
+# Copy frontend for :7860 serving (if needed)
+cp -r /root/julia_voice_v2/releases/${ARCHIVE_NAME}/release/frontend \
+     /root/julia_voice_v2/releases/${ARCHIVE_NAME}/frontend
+
+# Atomic activation
+/opt/julia/bin/julia-release-activate /root/julia_voice_v2/releases/${ARCHIVE_NAME}
+```
+
+### Verify
+
+```bash
+/opt/julia/bin/julia-runtime-attest
+```
+
+Must output `✅ RUNTIME ATTESTATION: PASS` before any E2E testing.
+
+## 9. Logs
 
 Primary logs:
 
 ```bash
-tail -f /var/log/julia/julia-voice.log
-tail -f /var/log/julia/julia-voice.err
-tail -f /var/log/julia/julia-voice-watchdog.log
-tail -f /var/log/julia/supervisord.log
-tail -f /var/log/julia/bootstrap-supervisord.log
+tail -f /var/log/julia/julia-voice.log          # S2S stdout
+tail -f /var/log/julia/julia-voice.err           # S2S stderr
+tail -f /var/log/julia/julia-voice-watchdog.log  # Watchdog
+tail -f /var/log/julia/julia-voice-frontend.log  # Frontend (:7860) stdout
+tail -f /var/log/julia/supervisord.log           # Supervisor
+tail -f /var/log/julia/bootstrap-supervisord.log # Bootstrap
 ```
 
 Important startup milestones in logs:
@@ -226,13 +323,15 @@ Important startup milestones in logs:
 - `Qwen3TTSHandler warmed up`
 - `OpenAI Realtime API starting on ws://0.0.0.0:8765/v1/realtime`
 - `Uvicorn running on http://0.0.0.0:8765`
+- `Uvicorn running on http://0.0.0.0:7860` (frontend)
+- `RUNTIME ATTESTATION: PASS`
 
 Watchdog milestones:
 
 - During cold start: `watchdog startup grace: service not READY yet; no restart (.../900s)`
 - After ready: `watchdog observed READY; failure counting enabled`
 
-## 8. Preflight and asset validation
+## 10. Preflight and asset validation
 
 Run preflight manually:
 
@@ -248,34 +347,25 @@ PRECHECK OK
 
 If preflight fails, do not start S2S. Fix the missing runtime asset/config through the normal deployment process.
 
-## 9. Loaded code verification
+## 11. Loaded code verification
 
 Run from AutoDL:
 
 ```bash
-REL=/root/julia_voice_v2/releases/rmd3g-c1-b18d1e42/release
-sha256sum \
-  "$REL/speech_to_speech/LLM/base_openai_compatible_language_model.py" \
-  "$REL/speech_to_speech/LLM/chat_completions_language_model.py" \
-  "$REL/speech_to_speech/api/openai_realtime/websocket_router.py"
+# Verify release integrity from manifest
+python3 -c "
+import json
+m = json.load(open('/root/julia_voice_v2/releases/current/manifest.json'))
+print(f'Source commit: {m[\"source_commit\"]}')
+print(f'Archive SHA256: {m[\"archive_sha256\"]}')
+print(f'Files: {m[\"file_count\"]}')
+"
+
+# Full runtime attestation
+/opt/julia/bin/julia-runtime-attest
 ```
 
-Expected:
-
-```text
-2f904a05128d5b11c92e6a2bd04769cd12c6e06f3a66e7d23dbb09b7eb34004c  base_openai_compatible_language_model.py
-725db87b6313a2cc601173be751ea8bca258eb2c601450ac4a0e273f92acb621  chat_completions_language_model.py
-12769ece09b8da10f6ea7be06064cb37dc58d8a41026d8d47bfe1d6ecd0c033c  websocket_router.py
-```
-
-To inspect the running process environment:
-
-```bash
-PID=$(cat /tmp/julia-voice-supervisor/s2s.pid)
-tr '\0' '\n' < /proc/$PID/environ | grep -E '^(PYTHONPATH|HF_HOME|HF_ENDPOINT|PYTHONDONTWRITEBYTECODE|LANG|PATH)='
-```
-
-## 10. Boot behavior
+## 12. Boot behavior
 
 AutoDL boot hooks installed:
 
@@ -295,13 +385,15 @@ boot hook
 → detached supervisord
 → preflight
 → S2S cold model loading
+→ frontend starts (:7860)
 → watchdog grace, no restart
-→ :8765 binds
+→ :8765 binds, :7860 binds
 → health READY
+→ runtime attestation PASS
 → Electron can connect
 ```
 
-## 11. Watchdog acceptance test
+## 13. Watchdog acceptance test
 
 This intentionally interrupts service and may require another cold model load. Only run when Tony approves a service interruption.
 
@@ -316,9 +408,9 @@ Expected:
 - watchdog remains single-instance
 - `:8765` eventually returns
 - `/opt/julia/bin/julia-voice-health` returns `READY`
-- no duplicate `:8765` listener
+- no duplicate `:8765` or `:7860` listener
 
-## 12. Clean reboot acceptance test
+## 14. Clean reboot acceptance test
 
 This interrupts service and may take 10+ minutes before READY. Only run when Tony approves a reboot/restart test.
 
@@ -328,12 +420,32 @@ Expected acceptance:
 2. No SSH manual export.
 3. No manual Python command.
 4. Boot hook starts supervisor.
-5. Supervisor starts S2S.
+5. Supervisor starts S2S and frontend.
 6. Models initialize from existing caches.
-7. `:8765` becomes READY.
-8. Tony opens Electron and hears Julia reply.
+7. `:8765` and `:7860` become READY.
+8. Runtime attestation PASS.
+9. Tony opens Electron and hears Julia reply.
 
-## 13. Troubleshooting
+## 15. Rollback
+
+If a new release is broken:
+
+```bash
+# Read previous release path
+cat /root/julia_voice_v2/releases/.previous
+
+# Activate previous release
+/opt/julia/bin/julia-release-activate /root/julia_voice_v2/releases/<previous-release>
+
+# Supervisor will restart from new current symlink
+kill "$(cat /tmp/julia-voice-supervisor/supervisord.pid)"
+/opt/julia/bin/bootstrap-julia-voice-supervisor
+
+# Verify
+/opt/julia/bin/julia-runtime-attest
+```
+
+## 16. Troubleshooting
 
 ### Electron cannot connect
 
@@ -341,11 +453,25 @@ Check:
 
 ```bash
 /opt/julia/bin/julia-voice-health
-ps -ef | grep -E 'julia-voice|speech-to-speech|supervisord' | grep -v grep
+/opt/julia/bin/julia-runtime-attest
+ps -ef | grep -E 'julia-voice|speech-to-speech|supervisord|uvicorn' | grep -v grep
 tail -80 /var/log/julia/julia-voice.err
+tail -80 /var/log/julia/julia-voice-frontend.log
 ```
 
 If service has been started recently, wait through cold model initialization. Do not restart during the first 10+ minutes unless logs show a fatal exception.
+
+### Split-brain: :7860 frontend and :8765 S2S from different releases
+
+RCP makes this structurally impossible because both use the same `current` symlink. If attestation fails on frontend/s2s SHA mismatch, check:
+
+```bash
+readlink -f /root/julia_voice_v2/releases/current
+tr '\0' '\n' < /proc/$(cat /tmp/julia-voice-supervisor/s2s.pid)/environ | grep PYTHONPATH
+readlink -f /proc/$(pgrep -f "7860.*uvicorn")/cwd
+```
+
+All three should point to the same release directory.
 
 ### Watchdog repeatedly restarts during startup
 
@@ -385,29 +511,31 @@ BRAIN_BASE_URL=http://127.0.0.1:8089/v1
 
 Check SSH tunnel and Brain health on Mac side. Do not change S2S source for tunnel failures.
 
-### Duplicate S2S processes
+### Duplicate processes
 
-Expected: exactly one S2S process and exactly one `:8765` listener.
+Expected: exactly one S2S process (:8765), one frontend process (:7860), one watchdog.
 
 If duplicate processes exist:
 
-1. Identify which PID owns `:8765`.
-2. Stop unmanaged/manual S2S processes.
-3. Keep only supervisor-managed S2S.
-4. Do not start S2S manually.
+1. Identify which PID owns each port.
+2. Stop unmanaged/manual processes.
+3. Keep only supervisor-managed processes.
+4. Do not start S2S or frontend manually.
 
-## 14. Prohibited production actions
+## 17. Prohibited production actions
 
 Do not:
 
-- edit S2S source directly on AutoDL
+- edit S2S or frontend source directly on AutoDL
 - patch site-packages
 - manually run `python launch_s2s.py` as production
+- manually run `uvicorn` as production
 - use tmux/screen/nohup as production lifecycle authority
 - download new model files during normal startup
 - point `PYTHONPATH` at a development worktree
-- run duplicate S2S services on `:8765`
+- run duplicate services on `:8765` or `:7860`
 - treat process existence as readiness
+- deploy frontend and S2S from different releases (RCP prevents this structurally)
 
 Normal production lifecycle authority is:
 
@@ -415,21 +543,33 @@ Normal production lifecycle authority is:
 AutoDL boot hook
 → /opt/julia/bin/bootstrap-julia-voice-supervisor
 → /usr/bin/supervisord -c /etc/supervisor/conf.d/julia-voice.conf
-→ /opt/julia/bin/start-julia-voice
-→ immutable Julia Voice release
+→ /opt/julia/bin/start-julia-voice   (:8765 S2S)
+→ /opt/julia/bin/start-julia-frontend (:7860 frontend)
+→ immutable Julia Voice RCP release (current symlink)
+→ /opt/julia/bin/julia-runtime-attest (verification gate)
 ```
 
-## 15. Final operator checklist
+## 18. Final operator checklist
 
 Use this checklist after any production restart or deployment:
 
 ```bash
+# Preflight
 /opt/julia/bin/julia-voice-preflight
+
+# Health
 /opt/julia/bin/julia-voice-health
-ps -ef | grep -E 'julia-voice|speech-to-speech|supervisord' | grep -v grep
+
+# Process check
+ps -ef | grep -E 'julia-voice|speech-to-speech|supervisord|uvicorn' | grep -v grep
 cat /tmp/julia-voice-supervisor/supervisord.pid
 cat /tmp/julia-voice-supervisor/s2s.pid
+
+# Environment check
 tr '\0' '\n' < /proc/$(cat /tmp/julia-voice-supervisor/s2s.pid)/environ | grep -E '^(PYTHONPATH|HF_HOME|HF_ENDPOINT|PYTHONDONTWRITEBYTECODE|LANG|PATH)='
+
+# Runtime attestation
+/opt/julia/bin/julia-runtime-attest
 ```
 
 Then perform one human E2E check:
@@ -438,4 +578,6 @@ Then perform one human E2E check:
 Electron → speak one sentence → Julia replies with audio
 ```
 
-Production is acceptable only when Tony can hear Julia reply after unattended startup.
+Production is acceptable only when:
+1. `julia-runtime-attest` = PASS (ALL SAME = YES)
+2. Tony can hear Julia reply after unattended startup

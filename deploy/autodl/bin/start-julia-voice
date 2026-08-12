@@ -9,7 +9,7 @@ set +a
 export PATH="/root/miniconda3/bin:${PATH:-}"
 export HF_HOME HF_ENDPOINT PYTHONPATH PYTHONDONTWRITEBYTECODE LANG
 "${JULIA_VOICE_PREFLIGHT:-/opt/julia/bin/julia-voice-preflight}"
-cd "${JULIA_S2S_RUN_ROOT:-/root/julia_voice_v2/run/rmd3g-c1-b18d1e42}"
+cd "${JULIA_S2S_RUN_ROOT:-/root/julia_voice_v2/run/current}"
 mkdir -p /tmp/julia-voice-supervisor
 echo $$ > /tmp/julia-voice-supervisor/s2s.pid
 exec "${JULIA_S2S_PYTHON:-/root/miniconda3/bin/python}" "${JULIA_S2S_CONSOLE:-/root/miniconda3/bin/speech-to-speech}" \

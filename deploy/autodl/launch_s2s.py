@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
-"""Launch Julia Voice S2S from the immutable RMD-3G C1 release.
+"""Launch Julia Voice S2S from the RCP immutable release.
 
-This launcher intentionally combines:
-- NEW fixed C1 code/artifact via PYTHONPATH
-- historical known-good runtime environment for HF caches/models
-
+This launcher is HISTORICAL — normal production lifecycle uses supervisor.
 It must not fall back to /golden source or site-packages for speech_to_speech.
 """
 import os
@@ -12,9 +9,9 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-RELEASE_ROOT = Path(os.environ.get("JULIA_S2S_RELEASE_ROOT", "/root/julia_voice_v2/releases/rmd3g-c1-b18d1e42"))
+RELEASE_ROOT = Path(os.environ.get("JULIA_S2S_RELEASE_ROOT", "/root/julia_voice_v2/releases/current"))
 RELEASE_PATH = RELEASE_ROOT / "release"
-RUN_ROOT = Path(os.environ.get("JULIA_S2S_RUN_ROOT", "/root/julia_voice_v2/run/rmd3g-c1-b18d1e42"))
+RUN_ROOT = Path(os.environ.get("JULIA_S2S_RUN_ROOT", "/root/julia_voice_v2/run/current"))
 LOG_PATH = Path(os.environ.get("JULIA_S2S_LOG", str(RUN_ROOT / "s2s.log")))
 PYTHON_BIN = os.environ.get("JULIA_S2S_PYTHON", "/root/miniconda3/bin/python")
 CONSOLE = os.environ.get("JULIA_S2S_CONSOLE", "/root/miniconda3/bin/speech-to-speech")

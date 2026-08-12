@@ -21,7 +21,7 @@ def require_sha(label, path, expected):
     if actual != expected:
         raise SystemExit(f'PRECHECK FAIL {label}: sha mismatch {actual} != {expected}')
 
-release=os.environ.get('JULIA_S2S_RELEASE_ROOT','/root/julia_voice_v2/releases/rmd3g-c1-b18d1e42')
+release=os.environ.get('JULIA_S2S_RELEASE_ROOT','/root/julia_voice_v2/releases/current')
 release_path=pathlib.Path(release)/'release'
 require_path('release', release_path, 'dir')
 require_path('python', os.environ.get('JULIA_S2S_PYTHON','/root/miniconda3/bin/python'), 'file')
