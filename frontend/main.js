@@ -1684,7 +1684,7 @@ void watchCameraPermission();
 window.addEventListener("pagehide", () => { endTrackedSession(); endQueueTicket(); });
 
 function postToElectron(payload) {
-  if (!_IN_IFRAME) { console.warn("[V2_DIAG_VOICE] postToElectron skipped — not in iframe"); return; }
+  if (_runtimeMode === RTMode.STANDALONE) { console.warn("[V2_DIAG_VOICE] postToElectron skipped — standalone mode"); return; }
   console.log("[V2_DIAG_VOICE] postToElectron", { type: payload.type, conversationId: payload.conversationId, role: payload.role });
   window.parent.postMessage({ source: "julia-voice", ...payload }, "*");
 }
@@ -1841,6 +1841,8 @@ async function handleHostMessage(event) {
   }
 }
 
+// Always listen for messages when in iframe — runtime mode determines behavior.
+// HOST_ATTACH message transitions from WAIT_HOST_ATTACH → HOSTED_BOUND.
 if (_IN_IFRAME) window.addEventListener("message", (event) => { void handleHostMessage(event); });
 
 requestAnimationFrame(() => {
