@@ -71,13 +71,15 @@ Production evidence after C2 deployment:
 
 ## CC-1-C3 observability / RCA authority
 
-STATUS: SOURCE COMMITTED / AWAITING ARTIFACT + DEPLOYMENT
+STATUS: MISSION COMPLETE / ROOT CAUSE CONFIRMED
 
 C3 is an observability-only work package. It does not change conversation behavior, timeout behavior, copied-history behavior, or Brain/Core architecture.
 
 C3 source authority:
 
 - Voice C3 observability code commit: `c0dc177558e300ed4325dbc1f89eb08515d9906c`
+- Voice C3 deployed release: `/root/julia_voice_v2/releases/cc1-c3-87971eb3`
+- Voice C3 artifact: `87971eb33489be32d8ffea5cf51b88336da29c194efe0c6859e4697399543fe6`
 
 C3 production-safe log points:
 
@@ -91,6 +93,44 @@ C3 tests:
 - `tests/test_cc1_c3_canonical_id_observability.py`
 - Exercises real OpenAI `SessionUpdateEvent` parser → `RuntimeConfig.apply_session_update()` → actual request augmentation → strict mocked HTTP boundary.
 - Includes negative case proving missing metadata leaves `conversation_id` absent.
+
+Production C3 evidence:
+
+- `CC1_SESSION_UPDATE conversation_id=EMPTY`
+- `CC1_RUNTIME_BIND conversation_id=EMPTY`
+- `S2S_LLM_REQUEST_START ... conversation_id=EMPTY`
+- `CC1_BRAIN_REQUEST conversation_id=EMPTY`
+
+Confirmed first broken boundary:
+
+- Voice frontend -> realtime `session.update` emitted an empty canonical conversation identity.
+- Brain/Core are not implicated by C3 evidence; direct Brain top-level `conversation_id` probes enter CRT correctly.
+
+## CC-1-C4 fail-closed canonical Voice binding
+
+STATUS: SOURCE COMMITTED / AWAITING JULIA AGENT IV&V AND DEPLOYMENT
+
+C4 source authority:
+
+- Voice C4 code commit: `47c03e0357c13f97b3e584935cf7d5d98567ab51`
+
+C4 purpose:
+
+- Fail closed when Electron-hosted Voice lacks a canonical `conversation_id`.
+- Remove permissive Electron-hosted S2S identity fallback.
+- Require `S2sWsRealtimeClient` canonical-required sessions to normalize and retain the non-empty `conversationId`.
+- Require `session.update.session.metadata.conversation_id` to equal the active client conversation before any canonical-required session can be considered configured.
+- Make same-C reuse valid only when the active client and configured session both prove the same canonical C.
+- Preserve standalone non-Electron empty-conversation behavior.
+
+C4 tests:
+
+- `frontend/tests/cc1-c4-fail-closed-bind.test.js`
+- Updated `frontend/tests/rmd3a-session-metadata.test.js`
+- `frontend npm test`: 22/22 PASS
+- Python C3/RMD focused suite: 17/17 PASS
+
+C4 does not restore copied history, `/external-turns`, workspace semantic bootstrap, or any Brain/Core authority path.
 
 ## Authoritative deployment docs/code
 
