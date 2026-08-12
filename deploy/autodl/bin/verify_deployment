@@ -1,0 +1,88 @@
+#!/bin/bash
+# verify_deployment — single gate: prove what's running matches expected Git SHA.
+# Usage: verify_deployment <expected_sha>
+# Output: DEPLOYMENT VERIFIED (exit 0) or DEPLOYMENT MISMATCH (exit 1)
+set -euo pipefail
+
+EXPECTED="${1:-}"
+[ -z "$EXPECTED" ] && { echo "DEPLOYMENT MISMATCH"; echo "usage: verify_deployment <expected_sha>"; exit 2; }
+
+CURRENT="/root/julia_voice_v2/releases/current"
+MANIFEST="$CURRENT/manifest.json"
+FAIL=0
+
+red()   { echo -e "\033[31m$*\033[0m"; }
+green() { echo -e "\033[32m$*\033[0m"; }
+
+match() {
+    local label="$1" expected="$2" actual="$3"
+    if [ "$expected" = "$actual" ]; then
+        green "  OK  $label"
+    else
+        red   "  MISMATCH  $label"
+        red   "       expected: $expected"
+        red   "       actual:   $actual"
+        FAIL=1
+    fi
+}
+
+echo "=== verify_deployment ==="
+echo "expected: $EXPECTED"
+echo ""
+
+# ── 1. manifest exists and source_commit matches expected ──
+[ -f "$MANIFEST" ] || { red "FATAL: no manifest at $MANIFEST"; FAIL=1; }
+if [ -f "$MANIFEST" ]; then
+    SOURCE=$(python3 -c "import json; print(json.load(open('$MANIFEST')).get('source_commit',''))")
+    match "manifest source_commit" "$EXPECTED" "$SOURCE"
+
+    EXPECTED_FW=$(python3 -c "import json; print(json.load(open('$MANIFEST')).get('frontend_main_sha',''))")
+    EXPECTED_WS=$(python3 -c "import json; print(json.load(open('$MANIFEST')).get('frontend_ws_sha',''))")
+else
+    EXPECTED_FW=""
+    EXPECTED_WS=""
+fi
+
+# ── 2. :7860 runtime ──
+FW_PID=$(pgrep -f "7860.*uvicorn" | head -1 || echo "")
+if [ -n "$FW_PID" ]; then
+    FW_CWD=$(readlink "/proc/$FW_PID/cwd" 2>/dev/null || echo "?")
+    FW_SERVED=$(curl -s http://127.0.0.1:7860/main.js | sha256sum | awk '{print $1}')
+    FW_DISK=$(sha256sum "$CURRENT/release/frontend/main.js" 2>/dev/null | awk '{print $1}' || echo "MISSING")
+    match ":7860 cwd"      "$CURRENT/release/frontend" "$FW_CWD"
+    match ":7860 served"   "$EXPECTED_FW" "$FW_SERVED"
+    match ":7860 disk"     "$EXPECTED_FW" "$FW_DISK"
+    WS_SERVED=$(curl -s http://127.0.0.1:7860/ws/s2s-ws-client.js | sha256sum | awk '{print $1}')
+    match ":7860 ws served" "$EXPECTED_WS" "$WS_SERVED"
+else
+    red "  MISSING  :7860 — uvicorn not running"
+    FAIL=1
+fi
+
+# ── 3. :8765 runtime ──
+S2S_PID=$(cat /tmp/julia-voice-supervisor/s2s.pid 2>/dev/null || echo "")
+if [ -n "$S2S_PID" ] && [ -d "/proc/$S2S_PID" ]; then
+    S2S_PYTHONPATH=$(tr '\0' '\n' < "/proc/$S2S_PID/environ" 2>/dev/null | grep "^PYTHONPATH=" | cut -d= -f2 || echo "?")
+    match ":8765 PYTHONPATH" "$CURRENT/release" "$S2S_PYTHONPATH"
+else
+    red "  MISSING  :8765 — S2S PID not found"
+    FAIL=1
+fi
+
+# ── 4. Health ──
+HEALTH=$(/opt/julia/bin/julia-voice-health 2>/dev/null || echo "UNHEALTHY")
+match ":8765 health" "READY" "$HEALTH"
+
+# ── 5. No stale processes from old releases ──
+STALE=$(ps aux | grep -E "cc1-c1|cc1-c2|cc1-c3|rmd3g-c1|rmd3g-c4|rmd3g-c[0-9]" | grep -v grep | wc -l)
+match "stale processes" "0" "$STALE"
+
+echo ""
+if [ "$FAIL" -eq 0 ]; then
+    green "DEPLOYMENT VERIFIED"
+    exit 0
+else
+    red "DEPLOYMENT MISMATCH"
+    red "DO NOT TEST"
+    exit 1
+fi
