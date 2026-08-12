@@ -10,7 +10,7 @@
 |---|---|---|---|
 | Voice/S2S | Julia-Voice-S2S | phase5/rmd-3g-observability | `25497cd` |
 | Electron | Julia_client | codex/bugfix/electron-c10-c11-projection | `3f8bca0` |
-| Core/CRT | Julia_core | cm-r0-fix | `f3d41f6` |
+| Core/CRT | Julia_core | cm-r0-fix | `5439e99` |
 | Brain | julia_ai_assistant_rmd3g_prod | (detached) | `bbd90af` |
 
 ## Server (AutoDL) Runtime
@@ -45,6 +45,7 @@
 5. Electron `ec83805`: filter accepts null/empty turn_id
 6. Electron `3f8bca0`: CC-2 Phase 1 VoiceSessionCache
 7. `25497cd`: voice prompt Chinese parenthetical ban
+8. Core `5439e99`: Message.source + Session.summary_status (Memory Foundation)
 
 ## Test Evidence
 
