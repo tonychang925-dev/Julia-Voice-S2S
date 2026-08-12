@@ -1,0 +1,76 @@
+#!/bin/bash
+# RCP: Runtime Attestation — verify live PID bytes match sealed release.
+# ANY mismatch → FAIL. All match → PASS.
+set -euo pipefail
+
+CURRENT="/root/julia_voice_v2/releases/current"
+MANIFEST="$CURRENT/manifest.json"
+FAIL=0
+
+red() { echo -e "\033[31m$*\033[0m"; }
+green() { echo -e "\033[32m$*\033[0m"; }
+
+check() {
+    local label="$1" expected="$2" actual="$3"
+    if [ "$expected" = "$actual" ]; then
+        green "  ✅ $label"
+    else
+        red "  ❌ $label — expected $expected, got $actual"
+        FAIL=1
+    fi
+}
+
+echo "=== RUNTIME ATTESTATION ==="
+echo "release: $(readlink -f $CURRENT)"
+echo ""
+
+# ── manifest exists ──
+[ -f "$MANIFEST" ] || { red "FATAL: no manifest"; exit 1; }
+EXPECTED_FW=$(python3 -c "import json; print(json.load(open('$MANIFEST')).get('frontend_main_sha',''))")
+EXPECTED_WS=$(python3 -c "import json; print(json.load(open('$MANIFEST')).get('frontend_ws_sha',''))")
+EXPECTED_SOURCE=$(python3 -c "import json; print(json.load(open('$MANIFEST')).get('source_commit',''))")
+
+# ── :7860 ──
+FW_PID=$(pgrep -f "7860.*uvicorn" | head -1 || echo "")
+if [ -n "$FW_PID" ]; then
+    FW_CWD=$(readlink "/proc/$FW_PID/cwd" 2>/dev/null || echo "?")
+    FW_SERVED=$(curl -s http://127.0.0.1:7860/main.js | sha256sum | awk '{print $1}')
+    FW_DISK=$(sha256sum "$CURRENT/frontend/main.js" 2>/dev/null | awk '{print $1}' || echo "MISSING")
+    check ":7860 cwd in current" "$CURRENT/frontend" "$FW_CWD"
+    check ":7860 served main.js" "$EXPECTED_FW" "$FW_SERVED"
+    check ":7860 disk main.js" "$EXPECTED_FW" "$FW_DISK"
+else
+    red "  ❌ :7860 NOT RUNNING"
+    FAIL=1
+fi
+
+# ── :7860 ws ──
+WS_SERVED=$(curl -s http://127.0.0.1:7860/ws/s2s-ws-client.js | sha256sum | awk '{print $1}')
+check ":7860 served s2s-ws-client.js" "$EXPECTED_WS" "$WS_SERVED"
+
+# ── :8765 ──
+S2S_PID=$(cat /tmp/julia-voice-supervisor/s2s.pid 2>/dev/null || echo "")
+if [ -n "$S2S_PID" ] && [ -d "/proc/$S2S_PID" ]; then
+    S2S_PYTHONPATH=$(tr '\0' '\n' < "/proc/$S2S_PID/environ" 2>/dev/null | grep "^PYTHONPATH=" | cut -d= -f2 || echo "?")
+    check ":8765 PYTHONPATH in current" "$CURRENT/release" "$S2S_PYTHONPATH"
+else
+    red "  ❌ :8765 S2S PID not found"
+    FAIL=1
+fi
+
+# ── Health ──
+HEALTH=$(/opt/julia/bin/julia-voice-health 2>/dev/null || echo "UNHEALTHY")
+check ":8765 health" "READY" "$HEALTH"
+
+# ── No stale processes ──
+STALE=$(ps aux | grep -E "cc1-c1|cc1-c2|cc1-c3|rmd3g-c1|rmd3g-c4|cc1-rt1-3f69a5" | grep -v grep | wc -l)
+check "stale processes" "0" "$STALE"
+
+echo ""
+if [ "$FAIL" -eq 0 ]; then
+    green "✅ RUNTIME ATTESTATION: PASS"
+    exit 0
+else
+    red "❌ RUNTIME ATTESTATION: FAIL"
+    exit 1
+fi
