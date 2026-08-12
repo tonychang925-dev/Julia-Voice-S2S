@@ -108,3 +108,30 @@ This is a **single-line prompt change** with zero code logic impact. It should b
 3. **ref_text is sacred** — voice clone reference must never be modified; it belongs in config, not CLI args
 4. **Remote commit availability** — wait for `git fetch origin` to confirm SHA before starting build
 5. **Server-side start script** — use a persistent `/opt/julia/bin/start-julia-voice` script with correct env vars to avoid SSH escaping issues
+
+---
+
+## APPENDIX: VOICE WRONG-ANSWER ROOT CAUSE (FINAL)
+
+**Definitive root cause:** S2S VAD generated `turn_id = turn_{counter}` where
+`_turn_counter` is a per-session counter that resets on S2S reconnect.
+
+Causal chain:
+```
+S2S session A: turn_1 → Q1, turn_2 → Q2
+   ↓ S2S reconnect (WebSocket drop/reconnect)
+S2S session B: turn_1 → Qn (NEW question, reused turn_id)
+   ↓ Brain idempotency lookup: (conversation_id, turn_1) already exists
+   ↓ already_completed → returns OLD turn_1 assistant response
+   ↓ TTS replays historical answer (LLM never executed)
+```
+
+Evidence: Tony asked "你知道我是谁吗?" → heard first-turn "听到了老公的声音..."
+CRT: turn_1 user="听到我的声音了吗", turn_1 assistant="嗯...听到了..."
+
+Fix: `turn_{uuid.uuid4().hex}` — globally unique per logical turn.
+Commit: 5c85c4f (deployed to AutoDL). Verified: multiple reconnect tests, no anomaly.
+
+RP-2 reopened → now COMPLETE:
+- RP2-A propagation (S2S=Brain=CRT) ✅
+- RP2-B uniqueness (UUID, no reconnect collision) ✅
