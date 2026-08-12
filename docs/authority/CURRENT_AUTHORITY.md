@@ -45,7 +45,7 @@ Historical failed candidates:
 
 ## CC-1-C2 production E2E failure and source remediation
 
-STATUS: SOURCE REMEDIATION COMMITTED / AWAITING ARTIFACT + DEPLOYMENT
+STATUS: SOURCE REMEDIATION DEPLOYED / SEMANTIC CONTINUITY STILL FAILING
 
 Production evidence superseded the prior CC-1 source IV&V conclusion because the review did not cover the active Voice frontend receiver.
 
@@ -57,13 +57,40 @@ Failure root cause:
 
 C2 source authority:
 
-- Voice C2 code commit: `850a94b516ef71d57f74960a8161cc46be7ba03b`
-- Voice C2 source package HEAD: `a4afa86173cc4321210ee96ac515f07a53a39533`
+- Voice C2 code commit: `e44de36f96e270532e3c734a43d0a0317e0ec11c`
 - Active receiver: `frontend/main.js` handles `julia.voice.conversation.bind` and ACKs `julia.voice.conversation.bound`.
 - S2S transport: `S2sWsRealtimeClient` receives the active canonical `conversationId`.
 - Old workspace bootstrap/flush are legacy compatibility only and must not seed semantic history.
 
-C2 is not production authority until a new deterministic artifact is built, staged, deployed, and runtime-verified.
+Production evidence after C2 deployment:
+
+- C2 frontend bind/ACK path deployed.
+- Voice media path remains functional.
+- Text → Voice semantic continuity still fails: real Voice turns do not appear under canonical Core conversation `conv_20260810_215104_4415455312`.
+- Direct Brain top-level `conversation_id` probe reaches CRT and persists under the canonical conversation, so the remaining broken region is `session.update → RuntimeConfig → S2S→Brain request`.
+
+## CC-1-C3 observability / RCA authority
+
+STATUS: SOURCE COMMITTED / AWAITING ARTIFACT + DEPLOYMENT
+
+C3 is an observability-only work package. It does not change conversation behavior, timeout behavior, copied-history behavior, or Brain/Core architecture.
+
+C3 source authority:
+
+- Voice C3 observability code commit: `c0dc177558e300ed4325dbc1f89eb08515d9906c`
+
+C3 production-safe log points:
+
+- `CC1_SESSION_UPDATE conversation_id=<C|EMPTY>` at active S2S `session.update` receiver.
+- `CC1_RUNTIME_BIND conversation_id=<C|EMPTY>` immediately after `RuntimeConfig.apply_session_update()`.
+- `S2S_LLM_REQUEST_START ... conversation_id=<C|EMPTY>` at LLM request start.
+- `CC1_BRAIN_REQUEST conversation_id=<C|EMPTY> voice_trace_id=<V|EMPTY>` at actual Chat Completions HTTP request boundary after `extra_body` merge.
+
+C3 tests:
+
+- `tests/test_cc1_c3_canonical_id_observability.py`
+- Exercises real OpenAI `SessionUpdateEvent` parser → `RuntimeConfig.apply_session_update()` → actual request augmentation → strict mocked HTTP boundary.
+- Includes negative case proving missing metadata leaves `conversation_id` absent.
 
 ## Authoritative deployment docs/code
 
