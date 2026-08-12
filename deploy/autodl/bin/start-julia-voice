@@ -12,6 +12,18 @@ export HF_HOME HF_ENDPOINT PYTHONPATH PYTHONDONTWRITEBYTECODE LANG
 cd "${JULIA_S2S_RUN_ROOT:-/root/julia_voice_v2/run/current}"
 mkdir -p /tmp/julia-voice-supervisor
 echo $$ > /tmp/julia-voice-supervisor/s2s.pid
+
+# CC-2-RT-S2S-FAILCLOSED: verify S2S import comes from release, not site-packages
+EXPECTED="$(readlink -f "${JULIA_S2S_CURRENT:-/root/julia_voice_v2/releases/current}/release")"
+ACTUAL="$("${JULIA_S2S_PYTHON:-/root/miniconda3/bin/python}" -c "import speech_to_speech; print(speech_to_speech.__file__)" 2>/dev/null)"
+case "$ACTUAL" in
+  "$EXPECTED"/*) ;;
+  *) echo "FATAL: S2S import provenance failed" >&2
+     echo "  expected: $EXPECTED/*" >&2
+     echo "  actual:   $ACTUAL" >&2
+     exit 3 ;;
+esac
+
 exec "${JULIA_S2S_PYTHON:-/root/miniconda3/bin/python}" "${JULIA_S2S_CONSOLE:-/root/miniconda3/bin/speech-to-speech}" \
   --mode realtime \
   --ws_host "${S2S_HOST:-0.0.0.0}" --ws_port "${S2S_PORT:-8765}" \
