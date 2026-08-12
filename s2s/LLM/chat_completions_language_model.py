@@ -360,6 +360,8 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
 
         if voice_trace_id:
             session_extra_body["voice_trace_id"] = voice_trace_id
+            # RP-2: canonical turn identity — S2S native turn_id as CRT turn_id
+            session_extra_body["turn_id"] = voice_trace_id
         if conversation_id:
             session_extra_body["conversation_id"] = conversation_id
 
