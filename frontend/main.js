@@ -296,9 +296,19 @@ let pinnedUrl = "";
 // Optional hidden user prompt supplied by the deployment. When non-empty, the
 // client asks the model to greet once after the initial session configuration.
 let startupGreeting = "";
-const hostParams = new URLSearchParams(window.location.search);
-const electronHosted = window.parent !== window && hostParams.has("juliaElectronHost");
 let configReadyPromise = Promise.resolve();
+
+// ── CC-1-RT1: Explicit Runtime Mode ──
+// Replaces fragile URL-param electronHosted inference with explicit handshake.
+// WAIT_HOST_ATTACH: in iframe, waiting for HOST_ATTACH from parent Electron
+// HOSTED_BOUND(C): Electron attached, canonical conversation C bound
+// STANDALONE: not in iframe, no canonical binding required
+const _IN_IFRAME = window.parent !== window;
+const RTMode = Object.freeze({ WAIT_HOST_ATTACH: "WAIT_HOST_ATTACH", HOSTED_BOUND: "HOSTED_BOUND", STANDALONE: "STANDALONE" });
+let _runtimeMode = _IN_IFRAME ? RTMode.WAIT_HOST_ATTACH : RTMode.STANDALONE;
+let _hostConversationId = "";
+let _hostAttachResolve = null;
+let _hostAttachPromise = new Promise(r => { _hostAttachResolve = r; });
 
 // ── Tool state ──────────────────────────────────────────────────────────────
 let toolsEnabled = loadTools();
@@ -342,7 +352,7 @@ function pushToolsToSession() {
 // streaming state. The client's events are forwarded to its on* methods.
 let userAudioReplaying = false;
 const chat = new ChatView({
-  electronHosted,
+  electronHosted: _IN_IFRAME,
   onUserAudioPlaybackChange(playing) {
     userAudioReplaying = playing;
     syncMicMuteState();
@@ -370,7 +380,7 @@ let micStream = null;
 let micMuted = false;
 /** @type {VoiceWorkspace | null} */
 let voiceWorkspace = null;
-let workspacePhase = electronHosted ? "UNBOUND" : "STANDALONE";
+let workspacePhase = _IN_IFRAME ? "WAIT_HOST_ATTACH" : "STANDALONE";
 // CC-1-C2: Core conversation identity mirrored for S2S transport only.
 // Not semantic history, not durable state, not conversation authority.
 let activeCanonicalConversationId = "";
@@ -1314,7 +1324,8 @@ function requireActiveCanonicalConversationId() {
 }
 
 function s2sConversationIdForStart() {
-  if (electronHosted) return requireActiveCanonicalConversationId();
+  if (_runtimeMode === RTMode.HOSTED_BOUND) return _hostConversationId;
+  if (_IN_IFRAME) return requireActiveCanonicalConversationId();
   return String(activeCanonicalConversationId || voiceWorkspace?.conversationId || "").trim();
 }
 
@@ -1356,10 +1367,10 @@ async function doStart(audioContext = null, options = {}) {
   const c = new S2sWsRealtimeClient({
     ...target,
     conversationId: requiredConversationId,
-    canonicalConversationRequired: electronHosted,
+    canonicalConversationRequired: _runtimeMode !== RTMode.STANDALONE,
     voice: settings.voice,
     instructions: effectiveInstructions(),
-    startupGreeting: electronHosted ? "" : startupGreeting,
+    startupGreeting: _IN_IFRAME ? "" : startupGreeting,
     acquireMic: acquireMicStream,
     deferMicCapture: options.deferMicCapture === true,
     tools: activeToolDefs(),
@@ -1492,7 +1503,7 @@ async function doStart(audioContext = null, options = {}) {
     await c.connect();
     if (options.waitForSessionConfigured === true) {
       const configuredConversationId = await c.waitUntilConfigured();
-      if (electronHosted && configuredConversationId !== requiredConversationId) {
+      if (_runtimeMode !== RTMode.STANDALONE && configuredConversationId !== requiredConversationId) {
         throw new Error(`Voice session configured another conversation: ${configuredConversationId || "EMPTY"} != ${requiredConversationId}`);
       }
     }
@@ -1673,13 +1684,13 @@ void watchCameraPermission();
 window.addEventListener("pagehide", () => { endTrackedSession(); endQueueTicket(); });
 
 function postToElectron(payload) {
-  if (!electronHosted) { console.warn("[V2_DIAG_VOICE] postToElectron skipped — not electronHosted"); return; }
+  if (!_IN_IFRAME) { console.warn("[V2_DIAG_VOICE] postToElectron skipped — not in iframe"); return; }
   console.log("[V2_DIAG_VOICE] postToElectron", { type: payload.type, conversationId: payload.conversationId, role: payload.role });
   window.parent.postMessage({ source: "julia-voice", ...payload }, "*");
 }
 
 function assertHostMessage(event, payload) {
-  return electronHosted
+  return _IN_IFRAME
     && event.source === window.parent
     && payload?.source === "julia-electron-v2"
     && typeof payload.type === "string";
@@ -1732,6 +1743,19 @@ async function handleHostMessage(event) {
   if (!assertHostMessage(event, payload)) return;
   const requestId = String(payload.requestId || "");
   try {
+    if (payload.type === "julia.voice.host.attach") {
+      // CC-1-RT1: Explicit Host Handshake
+      const protocol = String(payload.protocol || "").trim();
+      const conversationId = String(payload.conversationId || "").trim();
+      if (protocol !== "julia-electron-v2") throw new Error("HOST_ATTACH unknown protocol: " + protocol);
+      if (!conversationId) throw new Error("HOST_ATTACH requires canonical conversation_id");
+      _runtimeMode = RTMode.HOSTED_BOUND;
+      _hostConversationId = conversationId;
+      if (workspacePhase === "WAIT_HOST_ATTACH") workspacePhase = "HOSTED_BOUND";
+      _hostAttachResolve(conversationId);
+      // Chain into conversation.bind with the same conversation_id
+      payload = { ...payload, type: "julia.voice.conversation.bind", conversationId };
+    }
     if (payload.type === "julia.voice.conversation.bind") {
       const result = await bindCanonicalConversation(payload);
       postToElectron({
@@ -1813,7 +1837,7 @@ async function handleHostMessage(event) {
   }
 }
 
-if (electronHosted) window.addEventListener("message", (event) => { void handleHostMessage(event); });
+if (_IN_IFRAME) window.addEventListener("message", (event) => { void handleHostMessage(event); });
 
 requestAnimationFrame(() => {
   document.body.classList.remove("booting");

@@ -1,0 +1,75 @@
+#!/bin/bash
+# Julia Release Control Plane — Drift Detector
+# Run via cron every 60s. Verifies running code bytes match release manifest.
+# If drift detected: logs alert, marks release CONTAMINATED.
+# The system should refuse E2E if CONTAMINATED.
+
+set -euo pipefail
+
+CURRENT="/root/julia_voice_v2/releases/current"
+MANIFEST="$CURRENT/manifest.json"
+DRIFT_LOG="/var/log/julia/drift.log"
+STATE="/tmp/julia-voice-supervisor"
+
+mkdir -p "$(dirname "$DRIFT_LOG")"
+
+log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] $*" >> "$DRIFT_LOG"; }
+
+# ── Verify current exists ──
+[ -L "$CURRENT" ] || { log "DRIFT: current symlink missing"; exit 1; }
+[ -f "$MANIFEST" ] || { log "DRIFT: manifest missing"; exit 1; }
+
+# ── Check release is read-only ──
+RELEASE_ROOT=$(readlink -f "$CURRENT")
+if [ -w "$RELEASE_ROOT/frontend/main.js" ] 2>/dev/null; then
+    log "DRIFT: release $RELEASE_ROOT is writable — should be read-only"
+fi
+
+# ── Check frontend files against manifest ──
+EXPECTED_FW=$(python3 -c "import json; d=json.load(open('$MANIFEST')); print(d.get('frontend_main_sha',''))")
+EXPECTED_WS=$(python3 -c "import json; d=json.load(open('$MANIFEST')); print(d.get('frontend_ws_sha',''))")
+
+ACTUAL_FW=$(sha256sum "$CURRENT/frontend/main.js" 2>/dev/null | awk '{print $1}' || echo "MISSING")
+ACTUAL_WS=$(sha256sum "$CURRENT/frontend/ws/s2s-ws-client.js" 2>/dev/null | awk '{print $1}' || echo "MISSING")
+
+DRIFT=0
+
+if [ -n "$EXPECTED_FW" ] && [ "$ACTUAL_FW" != "$EXPECTED_FW" ]; then
+    log "DRIFT: frontend/main.js expected=$EXPECTED_FW actual=$ACTUAL_FW"
+    DRIFT=1
+fi
+
+if [ -n "$EXPECTED_WS" ] && [ "$ACTUAL_WS" != "$EXPECTED_WS" ]; then
+    log "DRIFT: frontend/ws/s2s-ws-client.js expected=$EXPECTED_WS actual=$ACTUAL_WS"
+    DRIFT=1
+fi
+
+# ── Check S2S running process release root ──
+S2S_PID=$(cat "$STATE/s2s.pid" 2>/dev/null || echo "")
+if [ -n "$S2S_PID" ] && [ -d "/proc/$S2S_PID" ]; then
+    S2S_PYTHONPATH=$(tr '\0' '\n' < "/proc/$S2S_PID/environ" 2>/dev/null | grep "^PYTHONPATH=" | cut -d= -f2 || echo "")
+    if [ -n "$S2S_PYTHONPATH" ] && ! echo "$S2S_PYTHONPATH" | grep -qF "$RELEASE_ROOT"; then
+        log "DRIFT: S2S PID $S2S_PID PYTHONPATH=$S2S_PYTHONPATH != $RELEASE_ROOT"
+        DRIFT=1
+    fi
+else
+    log "DRIFT: S2S not running or PID file missing"
+fi
+
+# ── Check :7860 frontend server release root ──
+FW_PID=$(pgrep -f "7860.*server" 2>/dev/null | head -1 || echo "")
+if [ -n "$FW_PID" ] && [ -d "/proc/$FW_PID" ]; then
+    FW_CWD=$(readlink "/proc/$FW_PID/cwd" 2>/dev/null || echo "")
+    if [ -n "$FW_CWD" ] && ! echo "$FW_CWD" | grep -qF "$RELEASE_ROOT"; then
+        log "DRIFT: Frontend PID $FW_PID cwd=$FW_CWD != $RELEASE_ROOT"
+        DRIFT=1
+    fi
+fi
+
+if [ "$DRIFT" -eq 1 ]; then
+    log "DRIFT DETECTED — production runtime does not match release manifest"
+    echo "CONTAMINATED by drift detection $(date -Iseconds)" >> "$RELEASE_ROOT/CONTAMINATED.txt" 2>/dev/null || true
+    exit 1
+fi
+
+exit 0
