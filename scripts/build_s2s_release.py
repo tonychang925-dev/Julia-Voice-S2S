@@ -45,8 +45,9 @@ def materialize_from_commit(commit: str, target_dir: Path) -> None:
     """Extract s2s/ and frontend/ from exact git commit object. Ambient working tree irrelevant."""
     with tempfile.TemporaryDirectory(prefix="rcp_src_") as src_tmp:
         src = Path(src_tmp)
+        # Clone with full depth to ensure the exact commit is reachable, then checkout
         subprocess.run(
-            ["git", "clone", "--depth", "1", "--no-checkout", str(REPO_ROOT), str(src)],
+            ["git", "clone", str(REPO_ROOT), str(src)],
             check=True, capture_output=True
         )
         subprocess.run(["git", "checkout", commit], cwd=src, check=True, capture_output=True)
