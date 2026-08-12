@@ -59,6 +59,19 @@ Post-startup verification:
 - S2S: PID, SHA, PYTHONPATH must resolve to release, PORT=8765  
 - Frontend: PID, SHA, CWD must resolve to release/frontend, PORT=7860
 
+On PASS: save `runtime_attestation.json` snapshot for incident review.
+
+```json
+{
+  "timestamp": "ISO8601",
+  "components": {
+    "brain":   { "pid": 0, "sha": "", "port": 0, "crt_commit": true },
+    "s2s":     { "pid": 0, "sha": "", "port": 0, "pythonpath": "" },
+    "frontend":{ "pid": 0, "sha": "", "port": 0, "cwd": "" }
+  }
+}
+```
+
 ### G0.5 Process Hygiene
 
 - :8765 count = 1
@@ -76,6 +89,18 @@ Any host.attach or bind protocol change must pass:
 
 Before S2S exec: verify `speech_to_speech.__file__` starts with expected release path.
 If it resolves to site-packages: STARTUP BLOCKED (exit 3).
+
+### G0.8 Environment Hash
+
+Same commit, different environment = different runtime. Capture on every deploy:
+
+```
+PYTHON_VERSION=$(python --version)
+DEPENDENCY_HASH=$(sha256sum requirements.freeze.txt)
+MODEL_CONFIG_HASH=$(sha256sum model_config.json 2>/dev/null || echo "N/A")
+```
+
+Store in manifest or runtime attestation. Changes to environment must be reviewed — not just code changes.
 
 ---
 
@@ -107,6 +132,16 @@ Check: old protocol test suite still passes.
 
 Reviewer: ____________ Date: ____________
 
+### G1.5 Memory / Conversation Authority (FUTURE)
+
+When Memory System is introduced, this gate activates. Until then: informational.
+
+- [ ] Conversation Authority preserved (CRT is sole conversation truth)
+- [ ] Memory can only append/govern — never mutate Conversation
+- [ ] Context Loader is sole cognitive ingress path
+- [ ] No bypass: raw history injection into LLM blocked
+- [ ] Memory extraction idempotent (same input → same output)
+
 ---
 
 ## Deployment Checklist
@@ -115,11 +150,12 @@ Before any `TEST AUTHORIZED` declaration, confirm ALL items:
 
 ```
 [ ] GitHub SHA = Mac SHA = Server manifest SHA
-[ ] G0.1-G0.7: ALL PASS
-[ ] G1.1-G1.4: ALL PASS
-[ ] Runtime attestation: ALL components verified
+[ ] G0.1-G0.8: ALL PASS
+[ ] G1.1-G1.5: ALL PASS
+[ ] Runtime attestation snapshot saved
 [ ] Process hygiene: counts verified
 [ ] S2S import provenance: release path confirmed
+[ ] Environment hash captured
 [ ] Reviewer signoff: COMPLETE
 ```
 
