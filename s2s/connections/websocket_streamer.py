@@ -90,8 +90,8 @@ class WebSocketStreamer:
         for client in list(self.clients):
             try:
                 await client.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                import logging; logging.getLogger("julia.failclosed").warning("%s:%d silent pass removed: %%s", "s2s/connections/websocket_streamer.py", 93, exc_info=True)
 
         self.server.close()
         await self.server.wait_closed()
