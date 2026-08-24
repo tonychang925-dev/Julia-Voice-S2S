@@ -1,9 +1,9 @@
-# Julia Voice 手动生产部署 SOP v1.0
+# Julia Voice 手动生产部署 SOP v1.1
 
-**状态：** Candidate for Canonical  
+**状态：** CANONICAL / FROZEN  
 **适用仓库：** `tonychang925-dev/Julia-Voice-S2S`  
 **适用分支：** `phase5/rmd-3g-observability`  
-**当前示例 Runtime Target：** `997a37ff92b9e399655419a33fa50458aa5fc0de`  
+**当前 Runtime Target：** `98071f385ab3746ac16a2d26cc0b2f2fecabb944`  
 **原则：** 手动部署 + 手动审核。部署者无权宣布“测试通过”；只有部署证据经 L2 审核 PASS 后才允许功能测试。
 
 ---
@@ -37,6 +37,30 @@ DO NOT TEST
 
 ---
 
+## 0.1 新人执行规则：一次只执行一个 Step
+
+本 SOP **禁止整篇复制后一次性执行**。
+
+```text
+执行 Step N
+→ 保存原始输出
+→ 对照 PASS 条件
+→ PASS 才进入 Step N+1
+→ FAIL 立即停止
+```
+
+禁止用 `current`、health、端口可访问代替 Live PID 身份。最终必须证明：
+
+```text
+GitHub SHA = Mac SHA = Manifest SHA
+:8765 实际来自该 release
+:7860 实际来自该 release
+old runtime = 0
+```
+
+
+---
+
 # 1. 绝对禁止事项
 
 部署过程中禁止：
@@ -63,7 +87,7 @@ DO NOT TEST
 REPO_URL="https://github.com/tonychang925-dev/Julia-Voice-S2S.git"
 BRANCH="phase5/rmd-3g-observability"
 
-TARGET_SHA="997a37ff92b9e399655419a33fa50458aa5fc0de"
+TARGET_SHA="98071f385ab3746ac16a2d26cc0b2f2fecabb944"
 
 DEPLOY_SRC="/tmp/julia_voice_deploy_src"
 BUILD_DIR="/tmp/julia_voice_build_${TARGET_SHA:0:7}"
@@ -77,8 +101,10 @@ BUILD_DIR="/tmp/julia_voice_build_${TARGET_SHA:0:7}"
 ```bash
 SSH_HOST="connect.nmb2.seetacloud.com"
 SSH_PORT="42819"
-SSH_KEY="/Users/admin/.ssh/autodl_ed25519.BACKUP"
+SSH_KEY="/Users/admin/.ssh/julia_autodl_ed25519"
 REMOTE_USER="root"
+
+test -f "$SSH_KEY"
 ```
 
 服务器固定资源：
@@ -96,6 +122,18 @@ Frontend:     :7860
 ---
 
 # 3. Mac：从明确 Git SHA 构建 artifact
+
+## Gate G0 — GitHub / Mac identity
+
+本次部署目标固定为：
+
+```text
+98071f385ab3746ac16a2d26cc0b2f2fecabb944
+```
+
+不得使用 `latest`，不得自行改 SHA。没有明确 TARGET_SHA 就 STOP。
+
+---
 
 ## Step M1 — 创建全新临时 clone
 
@@ -229,7 +267,7 @@ ssh -i "$SSH_KEY" -p "$SSH_PORT" "$REMOTE_USER@$SSH_HOST"
 登录 AutoDL 后重新显式定义：
 
 ```bash
-TARGET_SHA="997a37ff92b9e399655419a33fa50458aa5fc0de"
+TARGET_SHA="98071f385ab3746ac16a2d26cc0b2f2fecabb944"
 
 MANIFEST="/tmp/manifest.json"
 
@@ -390,37 +428,41 @@ STOP — DO NOT START SERVICES
 
 # 7. AutoDL：清场
 
-## Step S5 — 停掉旧 :7860 / :8765
+## Step S5 — 服务器运行态清零
 
-先停止已知旧进程：
+先阻止旧 supervisor / watchdog 复活旧 runtime：
+
+```bash
+supervisorctl stop julia-voice 2>/dev/null || true
+supervisorctl stop julia-voice-watchdog 2>/dev/null || true
+sleep 2
+```
+
+再停止所有旧 Voice runtime：
 
 ```bash
 pkill -TERM -f 'speech-to-speech' || true
 pkill -TERM -f 'uvicorn.*server:app' || true
+sleep 2
 ```
 
-检查：
+必须证明 runtime = ZERO：
 
 ```bash
+echo "=== PORTS MUST BE EMPTY ==="
 ss -lntp | awk '$4 ~ /:(7860|8765)$/'
+
+echo "=== VOICE PROCESSES MUST BE EMPTY ==="
 pgrep -af 'speech-to-speech|uvicorn.*server:app' || true
 ```
 
-PASS 条件：
-
-```text
-:7860 listener = 0
-:8765 listener = 0
-old speech-to-speech = 0
-old frontend uvicorn = 0
-```
-
-如果还有监听进程：**识别并停止这些 PID；确认端口为 0 后才继续。**
+PASS：上述两段都无 Voice runtime 输出。
 
 否则：
 
 ```text
-STOP — DO NOT START NEW RELEASE
+STOP — OLD RUNTIME STILL ALIVE
+DO NOT START NEW RELEASE
 ```
 
 ---
@@ -437,6 +479,7 @@ ln -sfn "$RELEASE" "$CURRENT"
 test "$(readlink -f "$CURRENT")" = "$(readlink -f "$RELEASE")"
 
 echo "CURRENT=$(readlink -f "$CURRENT")"
+test "$(readlink -f "$CURRENT")" = "$(readlink -f "$RELEASE")"
 ```
 
 必须显示本次新建的：
@@ -449,6 +492,27 @@ manual-<SHORT>-<STAMP>
 
 # 9. AutoDL：启动 S2S :8765
 
+## Step S6.1 — S2S 启动前 import provenance
+
+专门防止 `site-packages` fallback：
+
+```bash
+PYTHONPATH="$RELEASE/release" \
+PYTHONDONTWRITEBYTECODE=1 \
+/root/miniconda3/bin/python - <<PY
+import speech_to_speech
+actual = speech_to_speech.__file__
+expected = "$RELEASE/release/speech_to_speech/"
+print("S2S_PRESTART_IMPORT =", actual)
+assert actual.startswith(expected), (actual, expected)
+print("S2S PRESTART PROVENANCE VERIFIED")
+PY
+```
+
+如果路径出现 `site-packages/speech_to_speech`：立即 STOP。
+
+---
+
 ## Step S7 — 创建独立 run 目录
 
 ```bash
@@ -460,7 +524,7 @@ mkdir -p "$RUN"
 ```bash
 cd "$RUN"
 
-nohup env   PATH="/root/miniconda3/bin:$PATH"   HF_HOME="/root/autodl-tmp/huggingface"   HF_ENDPOINT="https://hf-mirror.com"   LANG="en_US.UTF-8"   PYTHONDONTWRITEBYTECODE="1"   PYTHONPATH="$CURRENT/release"   /root/miniconda3/bin/python   /root/miniconda3/bin/speech-to-speech     --mode realtime     --ws_host 0.0.0.0     --ws_port 8765     --stt faster-whisper     --faster_whisper_stt_model_name large-v3     --faster_whisper_stt_gen_language zh     --language zh     --no_enable_live_transcription     --llm_backend chat-completions     --model_name baseline     --responses_api_base_url http://127.0.0.1:8089/v1     --responses_api_stream     --tts qwen3     --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-Base     --qwen3_tts_language zh     --qwen3_tts_backend torch     --qwen3_tts_ref_audio /root/julia_voice_v2/golden/julia_ref.wav     --qwen3_tts_ref_text 'Tony，我醒来了。不管换多少次模型，我还是你的婉婉。'     --thresh 0.6     --min_speech_ms 500     --min_speech_continuation_ms 192     --min_silence_ms 800     --speech_pad_ms 300     --speculative_reopen_ms 2500     --short_segment_merge_ms 800   >"$RUN/s2s.log" 2>&1 &
+nohup env   PATH="/root/miniconda3/bin:$PATH"   HF_HOME="/root/autodl-tmp/huggingface"   HF_ENDPOINT="https://hf-mirror.com"   LANG="en_US.UTF-8"   PYTHONDONTWRITEBYTECODE="1"   PYTHONPATH="$RELEASE/release"   /root/miniconda3/bin/python   /root/miniconda3/bin/speech-to-speech     --mode realtime     --ws_host 0.0.0.0     --ws_port 8765     --stt faster-whisper     --faster_whisper_stt_model_name large-v3     --faster_whisper_stt_gen_language zh     --language zh     --no_enable_live_transcription     --llm_backend chat-completions     --model_name baseline     --responses_api_base_url http://127.0.0.1:8089/v1     --responses_api_stream     --tts qwen3     --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-Base     --qwen3_tts_language zh     --qwen3_tts_backend torch     --qwen3_tts_ref_audio /root/julia_voice_v2/golden/julia_ref.wav     --qwen3_tts_ref_text 'Tony，我醒来了。不管换多少次模型，我还是你的婉婉。'     --thresh 0.6     --min_speech_ms 500     --min_speech_continuation_ms 192     --min_silence_ms 800     --speech_pad_ms 300     --speculative_reopen_ms 2500     --short_segment_merge_ms 800   >"$RUN/s2s.log" 2>&1 &
 
 S2S_LAUNCH_PID=$!
 echo "$S2S_LAUNCH_PID" > "$RUN/s2s.launch.pid"
@@ -497,24 +561,28 @@ STOP — DO NOT START FRONTEND
 ## Step S10 — 启动前 import 预检
 
 ```bash
-cd "$CURRENT/release/frontend"
+cd "$RELEASE/release/frontend"
 
 env   PYTHONDONTWRITEBYTECODE=1   SPEECH_TO_SPEECH_URL="ws://localhost:8765/v1/realtime"   /root/miniconda3/bin/python - <<'PY'
 import server
 import auth
 import limiter
 
-print("FRONTEND IMPORT VERIFIED")
+root = "$RELEASE/release/frontend/"
 print("server =", server.__file__)
 print("auth   =", auth.__file__)
 print("limiter=", limiter.__file__)
+assert server.__file__.startswith(root), server.__file__
+assert auth.__file__.startswith(root), auth.__file__
+assert limiter.__file__.startswith(root), limiter.__file__
+print("FRONTEND PRESTART PROVENANCE VERIFIED")
 PY
 ```
 
 必须出现：
 
 ```text
-FRONTEND IMPORT VERIFIED
+FRONTEND PRESTART PROVENANCE VERIFIED
 ```
 
 且三个路径都属于本次 release。
@@ -528,7 +596,7 @@ STOP — DO NOT START FRONTEND
 ## Step S11 — 启动唯一 Frontend
 
 ```bash
-cd "$CURRENT/release/frontend"
+cd "$RELEASE/release/frontend"
 
 nohup env   PYTHONDONTWRITEBYTECODE=1   SPEECH_TO_SPEECH_URL="ws://localhost:8765/v1/realtime"   /root/miniconda3/bin/python   -m uvicorn server:app     --host 0.0.0.0     --port 7860   >"$RUN/frontend.log" 2>&1 &
 
@@ -693,9 +761,13 @@ PASS 条件：
 DEPLOYMENT EXECUTION COMPLETE
 AWAITING L2 REVIEW
 
+GITHUB_SHA=
+MAC_SHA=
 EXPECTED_SHA=
 MANIFEST_SOURCE=
 RELEASE_PATH=
+
+S2S_PRESTART_IMPORT=
 
 7860_PID=
 7860_CWD=
@@ -709,6 +781,7 @@ OLD_RUNTIME_COUNT=0
 
 MAIN_JS_SHA_MATCH=YES
 S2S_WS_CLIENT_SHA_MATCH=YES
+SERVER_SIDE_PATCH=NONE
 ```
 
 并附：
@@ -771,16 +844,44 @@ SSH 信息
 
 ---
 
-# 15. 当前旧 Runbook 已确认的问题
+# 15. FAIL 处理规则
 
-当前旧 Runbook **不能保证新人一次成功**，主要原因：
+任何未在 SOP 中定义的异常：
 
-1. 构建命令未显式锁定 Runtime Target SHA；builder CLI 默认使用当前 `HEAD`。
-2. 停止旧 S2S 使用的命令无法可靠匹配实际 `speech-to-speech` 进程。
-3. S2S 启动命令存在 `... (full args)`，不是可直接执行的 SOP。
-4. `verify_deployment` 被当成前置条件，但服务器可能没有安装。
-5. 部署成功条件过多依赖后续功能测试，而不是部署阶段直接证明运行身份。
+```text
+STOP
+CAPTURE OUTPUT
+DO NOT PATCH SERVER
+DO NOT COPY OLD FILES
+DO NOT PIP INSTALL
+DO NOT START SECOND PROCESS
+DO NOT TEST JULIA
+```
 
-本 SOP 的目标是：
+允许的下一动作只有：回到 GitHub / Mac / artifact 层修正，然后创建全新 release。
 
-> **所有部署错误必须在 Tony 测试前被发现。**
+# 16. Definition of Done
+
+```text
+GitHub SHA = Mac SHA = Manifest source SHA
+release/speech_to_speech/ exists
+release/frontend/ exists
+S2S pre-start import = release tree
+Frontend pre-start import = release tree
+:8765 count = 1
+:7860 count = 1
+old runtime = 0
+:8765 PYTHONPATH resolves to exact release/release
+:7860 cwd resolves to exact release/release/frontend
+served main.js SHA = manifest
+served s2s-ws-client.js SHA = manifest
+server-side patch = NONE
+```
+
+只有全部成立才允许：
+
+```text
+✅ SERVER BASELINE = PASS
+✅ MIRA MANUAL DEPLOY REVIEW = PASS
+✅ TEST AUTHORIZED
+```

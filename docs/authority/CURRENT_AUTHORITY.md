@@ -5,7 +5,7 @@ FROZEN: SOP v1.1
 
 ## Deployment Authority
 
-**Single canonical document**: `docs/RMD3G_PRODUCTION_RUNBOOK.md` (SOP v1.0)
+**Single canonical document**: `docs/JULIA_VOICE_MANUAL_DEPLOYMENT_SOP_v1.1.md` (SOP v1.1)
 
 That document is the ONLY authority for how to deploy Julia Voice to production.
 No other runbook, wiki, or verbal instruction overrides it.
