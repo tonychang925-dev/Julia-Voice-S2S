@@ -612,24 +612,50 @@ export class S2sWsRealtimeClient extends EventTarget {
       ws.binaryType = "arraybuffer";
       this._ws = ws;
 
-      const onceOpen = () => {
-        ws.removeEventListener("open", onceOpen);
-        ws.removeEventListener("error", onceErr);
-        resolve();
-      };
-      const onceErr = (e) => {
-        ws.removeEventListener("open", onceOpen);
-        ws.removeEventListener("error", onceErr);
-        reject(new Error(`WebSocket failed to open: ${e?.type ?? "error"}`));
-      };
-      ws.addEventListener("open", onceOpen);
-      ws.addEventListener("error", onceErr);
+      // VOICE-WS-LIFECYCLE-001: transport open != session established. The S2S
+      // single-slot pipeline rejects an overlapping dial with close(1008)
+      // AFTER the TCP/Upgrade handshake completes, so resolving on `open`
+      // reports "success" for a session the server immediately kills. Instead
+      // treat the first server message (session.created) as the session-ready
+      // signal; a 1008 close before that fails the connect so callers can
+      // retry rather than believing a dead session succeeded.
+      const established = new Promise((res, rej) => {
+        const onMessage = (e) => {
+          cleanup();
+          res(e.data);
+        };
+        const onClose = (e) => {
+          cleanup();
+          const reason = (e.reason || "").trim();
+          rej(new Error(`WebSocket closed (${e.code}) ${reason}`.trim()));
+        };
+        const onErr = () => {
+          cleanup();
+          rej(new Error(`WebSocket failed during session establishment`));
+        };
+        const timer = setTimeout(() => {
+          cleanup();
+          rej(new Error("WebSocket session establishment timeout"));
+        }, 15000);
+        const cleanup = () => {
+          clearTimeout(timer);
+          ws.removeEventListener("message", onMessage);
+          ws.removeEventListener("close", onClose);
+          ws.removeEventListener("error", onErr);
+        };
+        ws.addEventListener("message", onMessage);
+        ws.addEventListener("close", onClose);
+        ws.addEventListener("error", onErr);
+      });
 
+      ws.addEventListener("open", () => {});
       ws.addEventListener("message", (e) => this._onWsMessage(e.data));
       ws.addEventListener("close", (e) => this._onWsClose(e));
       ws.addEventListener("error", (e) => {
         console.error("[ws] socket error", e);
       });
+
+      established.then(resolve, reject);
     });
   }
 
@@ -1317,12 +1343,29 @@ export class S2sWsRealtimeClient extends EventTarget {
     }
     this._visualiser?.stop();
     this._visualiser = null;
-    try {
-      if (this._ws && this._ws.readyState <= WebSocket.OPEN) {
-        this._ws.close(1000, "client closed");
-      }
-    } catch {
-      // ignored
+    // VOICE-WS-LIFECYCLE-001: close() must not be fire-and-forget. The S2S
+    // single-slot pipeline releases its slot only after it processes the
+    // close; dialing the next session before that release races the handoff
+    // and is rejected with 1008. Await the socket's close event so teardown
+    // completion == server resource released. A timeout keeps teardown from
+    // hanging on a dead peer.
+    const ws = this._ws;
+    if (ws && ws.readyState <= WebSocket.OPEN) {
+      await new Promise((resolve) => {
+        const CLOSE_TIMEOUT_MS = 1000;
+        const done = () => {
+          clearTimeout(timer);
+          ws.removeEventListener("close", done);
+          resolve();
+        };
+        const timer = setTimeout(done, CLOSE_TIMEOUT_MS);
+        ws.addEventListener("close", done);
+        try {
+          ws.close(1000, "client closed");
+        } catch {
+          done();
+        }
+      });
     }
     this._ws = null;
 
