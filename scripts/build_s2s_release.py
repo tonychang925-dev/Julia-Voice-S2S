@@ -185,7 +185,10 @@ def build_artifact(output_dir: Path, commit: str | None = None, experiment: bool
                 info.uname = FIXED_UNAME
                 info.gname = FIXED_GNAME
                 info.mtime = FIXED_MTIME
-                info.mode = 0o644
+                # Honour the mode recorded by _walk_and_collect. It is "644" for
+                # everything except the experiment payload's entrypoints, so the
+                # default build is unaffected.
+                info.mode = 0o755 if entry.get("mode") == "755" else 0o644
 
                 with open(src, "rb") as fh:
                     tar.addfile(info, fh)

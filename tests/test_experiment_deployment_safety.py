@@ -379,6 +379,37 @@ def test_builder_refuses_experiment_when_the_payload_is_absent_from_the_commit(t
         builder.materialize_from_commit("a500f55bbd8d24a8a86ca103c6d52ff2fb332b77", tmp_path / "x", experiment=True)
 
 
+def test_experiment_artifact_keeps_its_entrypoints_executable(tmp_path):
+    """End-to-end: the built artifact must contain runnable entrypoints.
+
+    The server executes `<artifact>/run_tests`, so a 644 file there is a broken
+    artifact. This regressed once — the tar assembler hardcoded mode 644 and
+    silently discarded the preserved bit — so it is asserted against the real
+    built archive rather than against the helper that is supposed to set it.
+    """
+    tracked = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "deploy/experiment/run_tests"],
+        cwd=REPO, capture_output=True, text=True,
+    )
+    if tracked.returncode != 0:
+        pytest.skip("experiment payload is not committed yet; the builder reads commits, not the worktree")
+
+    builder = _load_module(BUILDER, "builder_p0d1_mode")
+    out = tmp_path / "out"
+    archive, _manifest = builder.build_artifact(out, experiment=True)
+
+    import tarfile
+
+    with tarfile.open(archive, "r:gz") as tar:
+        modes = {m.name: m.mode for m in tar.getmembers()}
+
+    assert modes["experiment/run_tests"] & 0o111, f"run_tests is not executable: {oct(modes['experiment/run_tests'])}"
+    assert modes["experiment/launch_experiment.sh"] & 0o111
+    # everything else must stay 644, exactly as before this capability existed
+    assert modes["speech_to_speech/s2s_pipeline.py"] & 0o777 == 0o644
+    assert modes["experiment/namespace.env"] & 0o777 == 0o644
+
+
 def test_builder_signature_defaults_to_non_experiment():
     import inspect
 
