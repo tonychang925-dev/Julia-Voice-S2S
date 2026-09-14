@@ -118,6 +118,21 @@ def _scrub(text: str, secret: Optional[str]) -> str:
     return text
 
 
+def _import_websockets() -> Any:
+    """Resolve the ``websockets`` module.
+
+    Deliberately a module-level helper rather than a local ``import`` inside
+    :meth:`ElevenLabsDialogueStream._connect`: a local import binds the name in
+    ``_connect``'s scope only, so ``_open`` could not see it and the real
+    transport path failed with ``NameError`` before the first connection.
+    Resolving it here gives both methods one explicit, patchable binding, and
+    keeps the import lazy so the offline tests never need the dependency.
+    """
+    import websockets
+
+    return websockets
+
+
 class ElevenLabsDialogueStream:
     """One per-utterance Text-to-Dialogue WebSocket.
 
@@ -148,6 +163,7 @@ class ElevenLabsDialogueStream:
         self._url = f"{ws_url}?model_id={model_id}&output_format={output_format}"
         self._connect_timeout_s = connect_timeout_s
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._ws_module: Any = None
         self._ws: Any = None
         self._recv_task: Optional[asyncio.Future] = None
         self._closed = False
@@ -155,10 +171,11 @@ class ElevenLabsDialogueStream:
     # ── connection ────────────────────────────────────────────────────
 
     def _connect(self) -> None:
-        try:
-            import websockets  # imported lazily: tests must not need the transport
-        except ImportError as exc:  # pragma: no cover - dependency of speech-to-speech
-            raise ProviderError(f"websockets is required for the ElevenLabs transport: {exc}") from exc
+        if self._ws_module is None:
+            try:
+                self._ws_module = _import_websockets()
+            except ImportError as exc:  # pragma: no cover - dependency of speech-to-speech
+                raise ProviderError(f"websockets is required for the ElevenLabs transport: {exc}") from exc
 
         self._loop = asyncio.new_event_loop()
         try:
@@ -170,7 +187,7 @@ class ElevenLabsDialogueStream:
     async def _open(self) -> None:
         assert self._loop is not None
         self._ws = await asyncio.wait_for(
-            websockets.connect(self._url),
+            self._ws_module.connect(self._url),
             timeout=self._connect_timeout_s,
         )
         # Credentials travel as a message field, not a header and never in the URL.
@@ -261,10 +278,7 @@ class ElevenLabsDialogueStream:
         if loop is None:
             return
         try:
-            if task is not None and not task.done():
-                task.cancel()
-            if ws is not None:
-                loop.run_until_complete(ws.close())
+            loop.run_until_complete(self._teardown(ws, task))
         except Exception as exc:  # noqa: BLE001 - teardown must never mask the real error
             logger.debug("ElevenLabs stream close raised (ignored): %s", _scrub(str(exc), self._api_key))
         finally:
@@ -273,6 +287,28 @@ class ElevenLabsDialogueStream:
             except Exception:  # noqa: BLE001
                 pass
             loop.close()
+
+    async def _teardown(self, ws: Any, task: Optional[asyncio.Future]) -> None:
+        """Settle the in-flight receive *before* the socket and the loop go away.
+
+        A bare ``task.cancel()`` would leave the task pending across
+        ``loop.close()``, so the invariant "no pending async task after close()"
+        would not hold. Cancelling and then awaiting it settles the task.
+        """
+        if task is not None:
+            if not task.done():
+                task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001 - the task's own failure is not teardown's problem
+                logger.debug("ElevenLabs receive task ended with an error during teardown", exc_info=True)
+        if ws is not None:
+            try:
+                await ws.close()
+            except Exception:  # noqa: BLE001
+                logger.debug("ElevenLabs websocket close raised during teardown", exc_info=True)
 
 
 class ElevenLabsTTSHandler(BaseHandler[TTSIn, TTSOut]):

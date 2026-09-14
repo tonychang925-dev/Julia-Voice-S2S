@@ -9,8 +9,10 @@ hygiene (T12). Test ids map 1:1 to the VOICE-EL-P0A task spec.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import importlib
+import json
 import logging
 import sys
 import types
@@ -438,6 +440,84 @@ def test_t12_api_key_never_reaches_logs_or_error_text(caplog):
     # The key is legitimately held in memory (it is required to authenticate);
     # what must never happen is that it is *logged* or placed in the URL.
     assert secret not in handler.ws_url
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# VOICE-EL-P0A-R1 — the real transport code path
+#
+# These tests exist because every other test in this file injects a fake
+# stream_factory, which bypasses ElevenLabsDialogueStream entirely. A defect
+# that only manifests on the real path (a local `import websockets` in
+# _connect() that _open() could not see) therefore shipped undetected. Only
+# the network call itself is patched here; all of _connect()/_open() runs.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_r1_real_transport_connect_path_binds_websockets_and_sends_init_frames(monkeypatch):
+    M = _imports()
+    ws = pytest.importorskip("websockets")
+
+    sent = []
+
+    class FakeConnection:
+        async def send(self, payload):
+            sent.append(json.loads(payload))
+
+        async def close(self):
+            sent.append({"__closed__": True})
+
+    async def fake_connect(url, *args, **kwargs):
+        sent.append({"__url__": url})
+        return FakeConnection()
+
+    # Patch ONLY the network call; the real _connect()/_open() body executes.
+    monkeypatch.setattr(ws, "connect", fake_connect)
+
+    stream = M.handler.ElevenLabsDialogueStream(text="hello julia", api_key="k", voice_id="voice-1")
+    stream._connect()  # the defect locus — used to raise NameError before connecting
+
+    assert sent[0]["__url__"].endswith("?model_id=eleven_v3_conversational&output_format=pcm_16000")
+    assert sent[1] == {"voices": ["voice-1"], "xi_api_key": "k"}
+    assert sent[2] == {"inputs": [{"text": "hello julia", "voice_id": "voice-1", "new_turn": False}]}
+    assert sent[3] == {"close_socket": True}
+
+    stream.close()
+    assert sent[-1] == {"__closed__": True}
+
+
+def test_r1_close_settles_pending_recv_task_and_closes_private_loop(monkeypatch):
+    M = _imports()
+    ws = pytest.importorskip("websockets")
+
+    class FakeConnection:
+        async def send(self, payload):
+            pass
+
+        async def recv(self):
+            await asyncio.Event().wait()  # never completes: a permanently pending receive
+
+        async def close(self):
+            pass
+
+    async def fake_connect(url, *args, **kwargs):
+        return FakeConnection()
+
+    monkeypatch.setattr(ws, "connect", fake_connect)
+
+    stream = M.handler.ElevenLabsDialogueStream(text="t", api_key="k", voice_id="v")
+    stream._connect()
+
+    assert stream.read(0.02) is None, "no frame within the poll window"
+    task = stream._recv_task
+    assert task is not None and not task.done(), "a receive must still be in flight"
+
+    loop = stream._loop
+    stream.close()
+
+    assert task.done(), "close() must settle the pending receive task, not merely cancel it"
+    assert task.cancelled(), "the settled task must be cancelled"
+    assert loop.is_closed(), "close() must close the private event loop"
+    assert stream._recv_task is None, "no task may outlive close()"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
