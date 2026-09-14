@@ -1,6 +1,6 @@
 # Julia-Voice-S2S Current Authority
 
-UPDATED: 2026-08-24
+UPDATED: 2026-09-15
 FROZEN: SOP v1.1
 
 ## Deployment Authority
@@ -9,6 +9,28 @@ FROZEN: SOP v1.1
 
 That document is the ONLY authority for how to deploy Julia Voice to production.
 No other runbook, wiki, or verbal instruction overrides it.
+
+## Server Mutation Authority
+
+**`docs/authority/SERVER_IMMUTABILITY_RULE_v1.md`** — normative, binding on every
+server experiment, not only ElevenLabs. The server is a deploy-only runtime; it
+is never a development environment.
+
+```
+Repository = Source Authority
+Server     = Runtime Evidence
+```
+
+No code, config, package, dependency, test harness or script may be authored,
+edited, installed or improvised on a server. If an artifact lacks something:
+
+```
+RESULT = DEPLOYMENT_ARTIFACT_INCOMPLETE  →  STOP, return to the repository
+```
+
+No server workaround is permitted — an "isolated" environment on the server is
+still a mutation of the server. Experiment isolation likewise comes from the
+artifact: `docs/authority/VOICE_EL_P0D1_IMMUTABLE_EXPERIMENT_DESIGN.md`.
 
 ## Canonical Release Layout
 

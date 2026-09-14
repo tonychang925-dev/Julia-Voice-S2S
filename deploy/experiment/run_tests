@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Artifact-side native gate entrypoint (VOICE-EL-P0D-1, Workstream E).
+
+This is the ONLY thing a server is asked to execute for experiment validation::
+
+    <artifact>/run_tests --expected-sha <exact 40-char source commit>
+
+It is self-locating: it lives at ``<release>/experiment/run_tests``, so the
+release root is derived from ``__file__`` rather than supplied or guessed. It
+then
+
+  1. loads the repository-defined namespace contract shipped beside it,
+  2. puts ``<release>/release`` at the front of the import path so the release
+     wins over the installed ``speech_to_speech`` package,
+  3. hands over to ``native_gate``, which attests the import locus and refuses
+     to run if the release did not actually win.
+
+No pytest, no network, no installation, no writes outside the declared
+namespace. The server runs what the repository built; it develops nothing.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+
+EXPERIMENT_DIR = os.path.dirname(os.path.abspath(__file__))
+RELEASE_ROOT = os.path.dirname(EXPERIMENT_DIR)
+RELEASE_TREE = os.path.join(RELEASE_ROOT, "release")
+
+
+def load_namespace(path: str) -> dict[str, str]:
+    """Parse the shipped namespace.env (simple KEY=VALUE, no expansion)."""
+    values: dict[str, str] = {}
+    if not os.path.isfile(path):
+        return values
+    with open(path, "r", encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            values[key.strip()] = value.strip()
+    return values
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Run the experiment release's native deployment gate.")
+    parser.add_argument("--expected-sha", required=True,
+                        help="Exact source commit the artifact must have been built from.")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+
+    namespace = load_namespace(os.path.join(EXPERIMENT_DIR, "namespace.env"))
+    for key, value in namespace.items():
+        os.environ.setdefault(key, value)
+
+    if not os.path.isdir(RELEASE_TREE):
+        print(f"FATAL: no release tree at {RELEASE_TREE} — artifact is not laid out as expected", file=sys.stderr)
+        return 2
+
+    # Release precedence. This is the mechanism that keeps the installed
+    # site-packages copy from silently winning; the locus gate then proves it.
+    sys.path.insert(0, RELEASE_TREE)
+    existing = os.environ.get("PYTHONPATH", "")
+    parts = [RELEASE_TREE] + [p for p in existing.split(os.pathsep) if p and p != RELEASE_TREE]
+    os.environ["PYTHONPATH"] = os.pathsep.join(parts)
+
+    sys.path.insert(0, EXPERIMENT_DIR)
+    import native_gate  # noqa: E402
+
+    print(f"release root : {RELEASE_ROOT}")
+    print(f"import root  : {RELEASE_TREE}")
+    print(f"PYTHONPATH   : {os.environ['PYTHONPATH']}")
+    print("")
+
+    return native_gate.main(["--release-root", RELEASE_ROOT, "--expected-sha", args.expected_sha]
+                            + (["--json"] if args.json else []))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
