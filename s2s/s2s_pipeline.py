@@ -734,6 +734,7 @@ def build_pipeline(
                 pocket_tts_handler_kwargs=pocket_tts_handler_kwargs,
                 kokoro_tts_handler_kwargs=kokoro_tts_handler_kwargs,
                 qwen3_tts_handler_kwargs=qwen3_tts_handler_kwargs,
+                elevenlabs_tts_handler_kwargs=elevenlabs_tts_handler_kwargs,
             )
             for i in range(pool_size)
         ]

@@ -206,14 +206,125 @@ def test_w6b_qwen3_handler_still_instantiates_unchanged():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# W7 — cancel_scope / speculative_turns reach the new handler
+# R1 — the realtime pool caller/callee contract
+#
+# A source-string assertion lived here previously. It passed on a candidate where
+# build_pipeline() did NOT pass elevenlabs_tts_handler_kwargs to
+# _build_realtime_pipeline_unit(), which is a TypeError on the production
+# topology. Source inspection cannot see a missing call argument. These tests
+# exercise the call instead.
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def test_w7_realtime_unit_injects_cancel_scope_into_elevenlabs_kwargs():
-    """The realtime builder mutates each TTS kwargs object with cancel_scope and
-    speculative_turns before building handlers. If the new provider is missing
-    from that loop, cancellation silently becomes inert in production."""
+class _FakeUnit:
+    """Stand-in for a PipelineUnit; only `.handlers` is read by build_pipeline."""
+
+    def __init__(self):
+        self.handlers: list[Any] = []
+
+
+def _call_build_pipeline(P, args, queues_and_events):
+    return P.build_pipeline(
+        args.module_kwargs,
+        args.socket_receiver_kwargs,
+        args.socket_sender_kwargs,
+        args.websocket_streamer_kwargs,
+        args.vad_handler_kwargs,
+        args.whisper_stt_handler_kwargs,
+        args.faster_whisper_stt_handler_kwargs,
+        args.paraformer_stt_handler_kwargs,
+        args.mlx_audio_whisper_stt_handler_kwargs,
+        args.parakeet_tdt_stt_handler_kwargs,
+        args.language_model_handler_kwargs,
+        args.responses_api_language_model_handler_kwargs,
+        args.chat_tts_handler_kwargs,
+        args.facebook_mms_tts_handler_kwargs,
+        args.pocket_tts_handler_kwargs,
+        args.kokoro_tts_handler_kwargs,
+        args.qwen3_tts_handler_kwargs,
+        args.elevenlabs_tts_handler_kwargs,
+        queues_and_events,
+    )
+
+
+def test_r1_build_pipeline_realtime_forwards_elevenlabs_kwargs_to_the_unit_builder(monkeypatch):
+    """build_pipeline(mode=realtime) must hand the ElevenLabs argument object to
+    _build_realtime_pipeline_unit. The callee requires it, so a missing kwarg is
+    a TypeError on the real topology — this asserts the call, not the source."""
     P = _pipeline()
-    source = inspect.getsource(P._build_realtime_pipeline_unit)
-    assert "elevenlabs_tts_kw" in source, "elevenlabs must be in the vars(kw) injection loop"
+    # Must go through prepare_all_args(): build_llm_proxy_config() indexes the
+    # post-rename keys, exactly as main() orders it.
+    _, args = _prepared("elevenlabs")
+    assert args.module_kwargs.mode == "realtime"
+
+    captured: dict[str, Any] = {}
+
+    def spy(**kwargs):
+        captured.update(kwargs)
+        return _FakeUnit()
+
+    monkeypatch.setattr(P, "_build_realtime_pipeline_unit", spy)
+    _call_build_pipeline(P, args, P.initialize_queues_and_events())
+
+    assert "elevenlabs_tts_handler_kwargs" in captured, (
+        "build_pipeline(realtime) dropped elevenlabs_tts_handler_kwargs — "
+        "the real _build_realtime_pipeline_unit would raise TypeError here"
+    )
+    assert captured["elevenlabs_tts_handler_kwargs"] is args.elevenlabs_tts_handler_kwargs
+
+
+def test_r1_realtime_unit_really_constructs_the_elevenlabs_handler(monkeypatch):
+    """Real _build_realtime_pipeline_unit -> real _build_pipeline_handlers ->
+    real get_tts_handler -> a real ElevenLabsTTSHandler, with cancel_scope wired.
+
+    Only the model-loading stages (VAD / STT / LLM) are stubbed: they need model
+    weights that this machine does not have. The TTS dispatch under test is real.
+    """
+    import speech_to_speech.TTS.elevenlabs_tts_handler as el
+
+    P = _pipeline()
+    _, args = _prepared("elevenlabs")
+
+    monkeypatch.setattr(P, "VADHandler", lambda *a, **k: _FakeUnit())
+    monkeypatch.setattr(P, "get_stt_handler", lambda *a, **k: _FakeUnit())
+    monkeypatch.setattr(P, "get_llm_handler", lambda *a, **k: _FakeUnit())
+
+    # Sentinel tracker so the injection can be proven by type, not by `is not None`:
+    # _build_realtime_pipeline_unit constructs it internally, so there is no other
+    # handle on the same instance.
+    class _SentinelTracker:
+        pass
+
+    monkeypatch.setattr(P, "SpeculativeTurnTracker", _SentinelTracker)
+
+    unit = P._build_realtime_pipeline_unit(
+        index=0,
+        stop_event=__import__("threading").Event(),
+        module_kwargs=args.module_kwargs,
+        vad_handler_kwargs=args.vad_handler_kwargs,
+        whisper_stt_handler_kwargs=args.whisper_stt_handler_kwargs,
+        faster_whisper_stt_handler_kwargs=args.faster_whisper_stt_handler_kwargs,
+        paraformer_stt_handler_kwargs=args.paraformer_stt_handler_kwargs,
+        mlx_audio_whisper_stt_handler_kwargs=args.mlx_audio_whisper_stt_handler_kwargs,
+        parakeet_tdt_stt_handler_kwargs=args.parakeet_tdt_stt_handler_kwargs,
+        language_model_handler_kwargs=args.language_model_handler_kwargs,
+        responses_api_language_model_handler_kwargs=args.responses_api_language_model_handler_kwargs,
+        chat_tts_handler_kwargs=args.chat_tts_handler_kwargs,
+        facebook_mms_tts_handler_kwargs=args.facebook_mms_tts_handler_kwargs,
+        pocket_tts_handler_kwargs=args.pocket_tts_handler_kwargs,
+        kokoro_tts_handler_kwargs=args.kokoro_tts_handler_kwargs,
+        qwen3_tts_handler_kwargs=args.qwen3_tts_handler_kwargs,
+        elevenlabs_tts_handler_kwargs=args.elevenlabs_tts_handler_kwargs,
+    )
+
+    tts_handlers = [h for h in unit.handlers if isinstance(h, el.ElevenLabsTTSHandler)]
+    assert len(tts_handlers) == 1, f"expected exactly one ElevenLabs handler, got {unit.handlers}"
+    handler = tts_handlers[0]
+
+    # Behavioural replacement for the removed source-string check: the realtime
+    # builder must have injected the unit's CancelScope (and the tracker) into the
+    # new provider, or cancellation would be silently inert in production.
+    assert handler.cancel_scope is unit.cancel_scope
+    assert isinstance(handler.speculative_turns, _SentinelTracker)
+    assert handler.output_format == "pcm_16000"
+
