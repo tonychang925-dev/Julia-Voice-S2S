@@ -332,7 +332,14 @@ class ElevenLabsTTSHandler(BaseHandler[TTSIn, TTSOut]):
         connect_timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S,
         recv_poll_s: float = DEFAULT_RECV_POLL_S,
         stream_factory: Callable[[str], DialogueStream] | None = None,
+        gen_kwargs: dict[str, Any] | None = None,
     ) -> None:
+        # `gen_kwargs` is part of the pipeline's handler-kwargs convention:
+        # prepare_all_args() -> rename_args() injects it into every TTS args dict,
+        # so setup() must accept it even though this provider has no generation
+        # parameters of its own. Omitting it made the handler un-instantiable
+        # through get_tts_handler().
+        self.gen_kwargs = gen_kwargs or {}
         self.should_listen = should_listen
         self.cancel_scope = cancel_scope
         self.speculative_turns = speculative_turns
