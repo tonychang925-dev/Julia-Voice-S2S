@@ -123,7 +123,21 @@ FORBIDDEN_PATTERNS = [
 ]
 
 
-@pytest.mark.parametrize("path", sorted(p for p in PAYLOAD.rglob("*") if p.is_file()))
+def _payload_source_files() -> list[Path]:
+    """The payload's real source files.
+
+    __pycache__ is excluded deliberately: bytecode left behind by an import
+    would otherwise be collected as if it were part of the artifact, which makes
+    the parametrized count depend on whether someone had run the gate — and
+    checks against binary blobs prove nothing.
+    """
+    return sorted(
+        p for p in PAYLOAD.rglob("*")
+        if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc"
+    )
+
+
+@pytest.mark.parametrize("path", _payload_source_files())
 def test_payload_contains_no_forbidden_operations(path):
     text = path.read_text(encoding="utf-8", errors="ignore")
     lowered = text.lower()
@@ -131,7 +145,7 @@ def test_payload_contains_no_forbidden_operations(path):
     assert not offenders, f"{path.name} contains forbidden operation(s): {offenders}"
 
 
-@pytest.mark.parametrize("path", sorted(p for p in PAYLOAD.rglob("*") if p.is_file()))
+@pytest.mark.parametrize("path", _payload_source_files())
 def test_payload_never_writes_generic_tmp_paths(path):
     """A bare /tmp/... write is what the aborted P0D did; rule 9 forbids it."""
     for lineno, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
