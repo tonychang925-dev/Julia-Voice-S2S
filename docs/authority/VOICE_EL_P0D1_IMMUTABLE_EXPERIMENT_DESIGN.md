@@ -178,9 +178,9 @@ being torn down anyway.
 Evidence:
 
 ```text
-websockets 15.0.1 : tests/test_experiment_deployment_safety.py        41 passed
+websockets 15.0.1 : tests/test_experiment_deployment_safety.py        42 passed
 websockets 12.0   : tests/test_experiment_deployment_safety.py +
-                    tests/test_elevenlabs_tts_handler.py               66 passed
+                    tests/test_elevenlabs_tts_handler.py               67 passed
 ```
 
 The 12.0 run used an isolated local venv (`/tmp/ws12venv`, local machine — never
@@ -314,7 +314,7 @@ IMMUTABILITY_RULE:            PASS   (doc + authority pointer + static tests)
 EXPERIMENT_NAMESPACE:         PASS   (namespace.env + gate precondition + tests)
 IMPORT_LOCUS_FAIL_CLOSED:     PASS   (locus.py; PASS/FAIL proven on 5 loci)
 SELF_CONTAINED_NATIVE_GATE:   PASS   (stdlib-only runner, G1-G10)
-WEBSOCKETS_12_COMPATIBILITY:  PASS   (66 passed under 12.0; 41 under 15.0.1)
+WEBSOCKETS_12_COMPATIBILITY:  PASS   (67 passed under 12.0; 42 under 15.0.1)
 MANIFEST_EXTENSION:           PASS   (--experiment block; default build byte-identical)
 BACKUP_CONTRACT:              PASS   (defined, not executed)
 
