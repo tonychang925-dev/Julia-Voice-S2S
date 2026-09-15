@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Repository-owned runtime entrypoint for an experiment release (VOICE-EL-P0D-1-R1).
+
+Why this file exists
+--------------------
+The launcher used to run ``$EXPERIMENT_PYTHON -m speech_to_speech``. The package
+has **no** ``__main__.py``, so that entrypoint was invalid. The historic runtime
+uses the ``speech-to-speech`` console script — but that executable lives in
+site-packages, and VOICE SERVER IMMUTABILITY RULE v1 requires all executable
+logic to originate from a reviewed repository commit.
+
+So the repository ships its own entrypoint, and the artifact is what provides it::
+
+    <release>/experiment/entrypoint
+
+INVOCATION CONTRACT — invoked explicitly through the repository-declared
+interpreter, never via the shebang and never via PATH::
+
+    "$EXPERIMENT_PYTHON" <release>/experiment/entrypoint --mode realtime --tts elevenlabs ...
+
+The release's code wins because the launcher puts ``<release>/release`` at the
+front of PYTHONPATH; this file prints the resolved module path so the runtime log
+carries provenance evidence rather than a promise.
+
+No CLI surface of its own: every argument is passed through to the pipeline, so
+the argument vector stays owned by ``experiment/runtime.args``.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+
+def _report_provenance() -> None:
+    """Emit the effective import locus into the runtime log (evidence, not a check)."""
+    try:
+        import speech_to_speech
+
+        resolved = os.path.realpath(speech_to_speech.__file__)
+        print(f"[experiment-entrypoint] speech_to_speech = {resolved}", flush=True)
+        print(f"[experiment-entrypoint] sys.executable   = {sys.executable}", flush=True)
+        print(f"[experiment-entrypoint] PYTHONPATH       = {os.environ.get('PYTHONPATH', '')}", flush=True)
+        print(f"[experiment-entrypoint] cwd              = {os.getcwd()}", flush=True)
+    except Exception as exc:  # noqa: BLE001 - provenance reporting must not be fatal
+        print(f"[experiment-entrypoint] provenance unavailable: {type(exc).__name__}: {exc}", flush=True)
+
+
+def main(argv: list[str] | None = None) -> int:
+    _report_provenance()
+    from speech_to_speech.s2s_pipeline import main as pipeline_main
+
+    pipeline_main()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

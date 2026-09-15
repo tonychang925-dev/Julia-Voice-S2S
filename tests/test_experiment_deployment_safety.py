@@ -19,6 +19,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -307,19 +308,28 @@ def test_runner_reports_manifest_sha_mismatch(tmp_path):
 def _stage_launcher(tmp_path: Path, release_name: str) -> Path:
     release_root = _fake_release(tmp_path, release_name=release_name, package=True)
     shutil.copytree(PAYLOAD, release_root / "experiment")
-    for name in ("run_tests", "launch_experiment.sh"):
+    for name in ("run_tests", "launch_experiment.sh", "entrypoint", "namespace.py"):
         p = release_root / "experiment" / name
         p.chmod(p.stat().st_mode | stat.S_IXUSR)
+    (release_root / "manifest.json").write_text(json.dumps(
+        {"source_commit": FAKE_SHA, "archive_name": "none.tar.gz", "archive_sha256": "deadbeef",
+         "file_count": 0, "files": []}, indent=2))
     return release_root
+
+
+# The launcher defaults EXPERIMENT_PYTHON to the target's absolute interpreter,
+# which does not exist here. Tests override it explicitly; the default itself is
+# asserted separately.
+def _launcher_env() -> dict[str, str]:
+    return {"EXPERIMENT_PYTHON": sys.executable}
 
 
 def test_launcher_dry_run_plans_an_experiment_namespace(tmp_path):
     release_root = _stage_launcher(tmp_path, "exp-0123456-20260101_000000")
     r = _run(["sh", str(release_root / "experiment" / "launch_experiment.sh"),
-              "--expected-sha", FAKE_SHA, "--dry-run"])
+              "--expected-sha", FAKE_SHA, "--dry-run"], env=_launcher_env())
     assert r.returncode == 0, r.stdout + r.stderr
     assert "DRY RUN" in r.stdout
-    assert "releases/exp-0123456" in r.stdout
     assert "run/exp-0123456" in r.stdout
     assert "logs/exp-0123456" in r.stdout
     assert "tmp/exp-0123456" in r.stdout
@@ -327,10 +337,33 @@ def test_launcher_dry_run_plans_an_experiment_namespace(tmp_path):
     assert "never printed" in r.stdout, "the launcher must state that secret values are not printed"
 
 
+def test_launcher_plan_references_only_artifact_owned_things(tmp_path):
+    """The plan must name the artifact's own entrypoint and the declared
+    interpreter, and must not reach for PATH, a console script, or production."""
+    release_root = _stage_launcher(tmp_path, "exp-0123456-20260101_000000")
+    r = _run(["sh", str(release_root / "experiment" / "launch_experiment.sh"),
+              "--expected-sha", FAKE_SHA, "--dry-run"], env=_launcher_env())
+    assert r.returncode == 0, r.stdout + r.stderr
+
+    assert str(release_root / "experiment" / "entrypoint") in r.stdout
+    assert sys.executable in r.stdout
+    assert "interpreter" in r.stdout
+    for forbidden in ("releases/current", "manual-",
+                      "/root/miniconda3/bin/speech-to-speech", "/opt/julia", "/etc/julia"):
+        assert forbidden not in r.stdout, f"plan references {forbidden}"
+
+    # A generic scratch path must not appear. Tokenised rather than substring-
+    # matched, because the repository namespace legitimately contains
+    # /root/julia_voice_v2/tmp/exp-<sha> and a naive "/tmp/" search would flag it.
+    tokens = re.findall(r"[/\w.\-]+", r.stdout)
+    generic = [t for t in tokens if t == "/tmp" or t.startswith("/tmp/")]
+    assert not generic, f"plan references a generic scratch path: {generic}"
+
+
 def test_launcher_refuses_a_golden_release(tmp_path):
     release_root = _stage_launcher(tmp_path, "manual-a500f55-20260824_145318")
     r = _run(["sh", str(release_root / "experiment" / "launch_experiment.sh"),
-              "--expected-sha", FAKE_SHA, "--dry-run"])
+              "--expected-sha", FAKE_SHA, "--dry-run"], env=_launcher_env())
     assert r.returncode == 65
     assert "REFUSED" in r.stderr
 
@@ -340,9 +373,24 @@ def test_launcher_refuses_the_current_symlink(tmp_path):
     current = tmp_path / "releases" / "current"
     current.symlink_to(target)
     r = _run(["sh", str(current / "experiment" / "launch_experiment.sh"),
-              "--expected-sha", FAKE_SHA, "--dry-run"])
+              "--expected-sha", FAKE_SHA, "--dry-run"], env=_launcher_env())
     assert r.returncode == 65
     assert "current" in r.stderr
+
+
+def test_launcher_refuses_when_the_declared_interpreter_is_absent(tmp_path):
+    release_root = _stage_launcher(tmp_path, "exp-0123456-20260101_000000")
+    r = _run(["sh", str(release_root / "experiment" / "launch_experiment.sh"),
+              "--expected-sha", FAKE_SHA, "--dry-run"],
+             env={"EXPERIMENT_PYTHON": str(tmp_path / "no-such-python")})
+    assert r.returncode == 69
+    assert "not executable" in r.stderr
+
+
+def test_launcher_defaults_to_the_target_absolute_interpreter():
+    ns = (PAYLOAD / "namespace.env").read_text(encoding="utf-8")
+    assert "/root/miniconda3/bin/python" in ns
+    assert "EXPERIMENT_PYTHON=${EXPERIMENT_PYTHON:-/root/miniconda3/bin/python}" in ns
 
 
 def test_launcher_does_not_reuse_production_ports_or_paths():
@@ -350,6 +398,14 @@ def test_launcher_does_not_reuse_production_ports_or_paths():
     assert "8765" not in text and "7860" not in text, "ports come from namespace.env, never hardcoded"
     assert "julia-voice-supervisor" not in text
     assert "supervisorctl" not in text
+    assert "speech-to-speech" not in text, "no site-packages console script"
+
+
+def test_launcher_never_invokes_python_via_path():
+    """P0D-0 proved the target's non-interactive PATH has no python3."""
+    text = LAUNCHER.read_text(encoding="utf-8")
+    assert "python3 " not in text and "`python3" not in text
+    assert '"$PY"' in text, "every interpreter invocation goes through the declared absolute path"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -408,6 +464,229 @@ def test_experiment_artifact_keeps_its_entrypoints_executable(tmp_path):
     # everything else must stay 644, exactly as before this capability existed
     assert modes["speech_to_speech/s2s_pipeline.py"] & 0o777 == 0o644
     assert modes["experiment/namespace.env"] & 0o777 == 0o644
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# R1 — namespace materialization (the shared implementation)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _namespaces():
+    return _load_module(PAYLOAD / "namespace.py", "ns_materialize")
+
+
+def test_templates_materialize_into_concrete_roots():
+    ns = _namespaces()
+    result = ns.concrete_for_release(str(NAMESPACE_ENV),
+                                     "/root/julia_voice_v2/releases/exp-0123456-20260101_000000",
+                                     FAKE_SHA)
+    assert result["missing_templates"] == []
+    assert result["unresolved"] == [], f"placeholders left unresolved: {result['unresolved']}"
+    assert result["roots"]["EXPERIMENT_RUN_ROOT"] == "/root/julia_voice_v2/run/exp-0123456"
+    assert result["roots"]["EXPERIMENT_LOG_ROOT"] == "/root/julia_voice_v2/logs/exp-0123456"
+    assert result["roots"]["EXPERIMENT_TMP_ROOT"] == "/root/julia_voice_v2/tmp/exp-0123456"
+
+
+def test_stamp_is_recovered_from_the_release_directory_name():
+    """Both consumers must derive the same roots from the same on-disk facts,
+    not from two independent clocks."""
+    ns = _namespaces()
+    a = ns.concrete_for_release(str(NAMESPACE_ENV), "/root/julia_voice_v2/releases/exp-0123456-20260101_000000", FAKE_SHA)
+    b = ns.concrete_for_release(str(NAMESPACE_ENV), "/root/julia_voice_v2/releases/exp-0123456-20260101_000000", FAKE_SHA)
+    assert a["stamp"] == b["stamp"] == "20260101_000000"
+    assert a["roots"] == b["roots"]
+
+
+def test_materialized_namespace_satisfies_the_gate_precondition(tmp_path):
+    """The value the gate checks must be the value the launcher creates."""
+    ns = _namespaces()
+    gate = _load_module(PAYLOAD / "native_gate.py", "native_gate_materialized")
+    result = ns.concrete_for_release(str(NAMESPACE_ENV),
+                                     "/root/julia_voice_v2/releases/exp-0123456-20260101_000000",
+                                     FAKE_SHA)
+    check = gate.check_namespace(dict(result["concrete"], **result["roots"]))
+    assert check["ok"] is True, check["detail"]
+
+
+def test_namespace_cli_shell_format_is_eval_safe(tmp_path):
+    r = _run([sys.executable, str(PAYLOAD / "namespace.py"),
+              "--namespace-env", str(NAMESPACE_ENV),
+              "--release-root", "/root/julia_voice_v2/releases/exp-0123456-20260101_000000",
+              "--sha", FAKE_SHA, "--format", "shell"])
+    assert r.returncode == 0, r.stderr
+    lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
+    assert len(lines) == 3
+    for line in lines:
+        assert line.startswith(("EXPERIMENT_RUN_ROOT=", "EXPERIMENT_LOG_ROOT=", "EXPERIMENT_TMP_ROOT="))
+        assert " " not in line, "an eval'd assignment must not contain unquoted spaces"
+    # and the shell must actually be able to consume it
+    check = subprocess.run(
+        ["sh", "-c",
+         f'eval "$({sys.executable!s} {PAYLOAD / "namespace.py"} --namespace-env {NAMESPACE_ENV} '
+         f'--release-root /root/julia_voice_v2/releases/exp-0123456-20260101_000000 '
+         f'--sha {FAKE_SHA} --format shell)"; echo "$EXPERIMENT_RUN_ROOT"'],
+        capture_output=True, text=True)
+    assert check.stdout.strip() == "/root/julia_voice_v2/run/exp-0123456"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# R1 — the real artifact, executed end to end
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _build_and_extract(tmp_path: Path) -> tuple[Path, str]:
+    tracked = subprocess.run(["git", "ls-files", "--error-unmatch", "deploy/experiment/run_tests"],
+                             cwd=REPO, capture_output=True, text=True)
+    if tracked.returncode != 0:
+        pytest.skip("experiment payload is not committed yet; the builder reads commits, not the worktree")
+
+    builder = _load_module(BUILDER, "builder_e2e")
+    out = tmp_path / "out"
+    out.mkdir()
+    archive, manifest = builder.build_artifact(out, experiment=True)
+    sha = manifest["source_commit"]
+
+    release_root = tmp_path / "releases" / f"exp-{sha[:7]}-20260101_000000"
+    release_root.mkdir(parents=True)
+    subprocess.run(["tar", "-xzf", str(archive), "-C", str(release_root)], check=True)
+    shutil.copy(out / "manifest.json", release_root / "manifest.json")
+    return release_root, sha
+
+
+def test_real_artifact_has_the_expected_layout(tmp_path):
+    release_root, _sha = _build_and_extract(tmp_path)
+    assert (release_root / "release" / "speech_to_speech" / "__init__.py").is_file()
+    assert (release_root / "release" / "frontend" / "main.js").is_file()
+    assert (release_root / "experiment" / "run_tests").is_file()
+    assert (release_root / "manifest.json").is_file()
+
+
+def test_real_artifact_native_gate_passes_namespace_and_locus(tmp_path):
+    """The whole point of R1: the built artifact's own runner, run from a clean
+    directory with no PYTHONPATH, must reach and pass NAMESPACE, G1 and G2.
+
+    Nothing from the repository working tree and nothing from an installed
+    speech_to_speech may satisfy this — the only importable copy is the one
+    inside the extracted artifact.
+    """
+    release_root, sha = _build_and_extract(tmp_path)
+
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    r = subprocess.run([sys.executable, str(release_root / "experiment" / "run_tests"),
+                        "--expected-sha", sha],
+                       capture_output=True, text=True, env=env, cwd=str(tmp_path))
+
+    assert r.returncode != 3, f"runner refused: {r.stdout}\n{r.stderr}"
+    assert "[PASS] NAMESPACE" in r.stdout, r.stdout
+    assert "[PASS] G1" in r.stdout, r.stdout
+    assert "[PASS] G2" in r.stdout, r.stdout
+    # the attested locus is inside the extracted artifact, not site-packages
+    assert str(release_root / "release") in r.stdout, r.stdout
+
+
+def test_real_artifact_runner_uses_the_interpreter_it_was_given(tmp_path):
+    """The runner reports the interpreter it is executing under, so the runtime
+    evidence names the real one rather than assuming PATH resolved something."""
+    release_root, sha = _build_and_extract(tmp_path)
+    r = subprocess.run([sys.executable, str(release_root / "experiment" / "run_tests"),
+                        "--expected-sha", sha],
+                       capture_output=True, text=True,
+                       env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"},
+                       cwd=str(tmp_path))
+    assert f"interpreter    : {sys.executable}" in r.stdout, r.stdout
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# R1 — no dependence on PATH
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _coreutils_only_path(tmp_path: Path) -> str:
+    """A PATH with the shell utilities the launcher legitimately needs, and
+    deliberately without any interpreter — the situation P0D-0 measured on the
+    target's non-interactive shell."""
+    bindir = tmp_path / "coreutils"
+    bindir.mkdir()
+    for tool in ("dirname", "basename", "grep", "sed", "date", "cut", "tr", "cat", "mkdir", "env"):
+        found = shutil.which(tool)
+        if found:
+            (bindir / tool).symlink_to(found)
+    return str(bindir)
+
+
+def test_launcher_works_without_an_interpreter_on_path(tmp_path):
+    release_root = _stage_launcher(tmp_path, "exp-0123456-20260101_000000")
+    path = _coreutils_only_path(tmp_path)
+    assert shutil.which("python3", path=path) is None, "precondition: no interpreter on the test PATH"
+
+    r = subprocess.run(
+        ["/bin/sh", str(release_root / "experiment" / "launch_experiment.sh"),
+         "--expected-sha", FAKE_SHA, "--dry-run"],
+        capture_output=True, text=True,
+        env={"PATH": path, "EXPERIMENT_PYTHON": sys.executable, "HOME": str(tmp_path)},
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "DRY RUN" in r.stdout
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# R1 — the runtime entrypoint is artifact-owned and valid
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_entrypoint_is_shipped_executable_with_the_payload(tmp_path):
+    release_root, _sha = _build_and_extract(tmp_path)
+    entry = release_root / "experiment" / "entrypoint"
+    assert entry.is_file()
+    assert entry.stat().st_mode & 0o111, "the entrypoint must be executable in the artifact"
+    assert entry.read_text(encoding="utf-8").strip(), "empty entrypoint"
+
+
+def test_entrypoint_runs_the_pipeline_main_and_passes_arguments_through(tmp_path):
+    """Proves the entrypoint is a valid runtime entry without needing torch:
+    a stub speech_to_speech package stands in for the release and records what
+    it was called with."""
+    stub_root = tmp_path / "stub"
+    pkg = stub_root / "speech_to_speech"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("__version__ = 'stub'\n")
+    (pkg / "s2s_pipeline.py").write_text(textwrap.dedent(
+        """
+        import json, os, sys
+        def main():
+            with open(os.environ["STUB_RECORD"], "w") as fh:
+                json.dump(sys.argv[1:], fh)
+        """
+    ))
+
+    record = tmp_path / "record.json"
+    r = subprocess.run([sys.executable, str(PAYLOAD / "entrypoint"),
+                        "--mode", "realtime", "--tts", "elevenlabs"],
+                       capture_output=True, text=True,
+                       env={"PYTHONPATH": str(stub_root), "STUB_RECORD": str(record), "PATH": ""})
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert json.loads(record.read_text()) == ["--mode", "realtime", "--tts", "elevenlabs"]
+    assert "[experiment-entrypoint] speech_to_speech = " in r.stdout, "provenance must be emitted"
+
+
+def test_entrypoint_is_a_direct_import_not_an_indirect_launch():
+    """Assert the mechanism, not the vocabulary: the file must call the pipeline
+    entry in-process rather than shelling out to a launcher it does not own."""
+    text = (PAYLOAD / "entrypoint").read_text(encoding="utf-8")
+    assert "from speech_to_speech.s2s_pipeline import main" in text
+    assert "pipeline_main()" in text
+    assert "subprocess" not in text, "no shelling out"
+    assert "os.system" not in text
+    assert "console_scripts" not in text
+
+
+def test_manifest_records_the_runtime_program_and_layout(tmp_path):
+    builder = _load_module(BUILDER, "builder_layout")
+    meta = builder._experiment_metadata(PAYLOAD, "abc", [])
+    assert meta["runtime_program"] == "experiment/entrypoint"
+    assert meta["layout"]["extract_into"] == "<release_root>"
+    assert meta["layout"]["release_tree"] == "release/"
 
 
 def test_builder_signature_defaults_to_non_experiment():

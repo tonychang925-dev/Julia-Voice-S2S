@@ -40,6 +40,7 @@ EXPERIMENT_DIR = REPO_ROOT / "deploy" / "experiment"
 
 EXPERIMENT_CAPABILITY_VERSION = 1
 EXPERIMENT_PAYLOAD_DIRNAME = "experiment"
+RELEASE_DIRNAME = "release"
 
 
 def verify_remote_commit(commit: str) -> None:
@@ -53,7 +54,19 @@ def verify_remote_commit(commit: str) -> None:
 
 
 def materialize_from_commit(commit: str, target_dir: Path, experiment: bool = False) -> None:
-    """Extract s2s/ and frontend/ from exact git commit object. Ambient working tree irrelevant."""
+    """Extract s2s/ and frontend/ from exact git commit object. Ambient working tree irrelevant.
+
+    Layout differs deliberately between the two modes:
+
+      default     <root>/speech_to_speech, <root>/frontend          (Golden layout)
+      experiment  <root>/release/{speech_to_speech,frontend},
+                  <root>/experiment                                 (experiment layout)
+
+    The experiment needs the application tree and the payload to be siblings of
+    a ``release/`` directory, so that ONE extraction into the release root
+    produces exactly the structure run_tests and the launcher expect. Without
+    it, run_tests can never locate its own release tree.
+    """
     with tempfile.TemporaryDirectory(prefix="rcp_src_") as src_tmp:
         src = Path(src_tmp)
         # Clone with full depth to ensure the exact commit is reachable, then checkout
@@ -62,8 +75,11 @@ def materialize_from_commit(commit: str, target_dir: Path, experiment: bool = Fa
             check=True, capture_output=True
         )
         subprocess.run(["git", "checkout", commit], cwd=src, check=True, capture_output=True)
-        shutil.copytree(src / "s2s", target_dir / "speech_to_speech", symlinks=False)
-        shutil.copytree(src / "frontend", target_dir / "frontend", symlinks=False)
+        app_root = target_dir / RELEASE_DIRNAME if experiment else target_dir
+        if experiment:
+            app_root.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src / "s2s", app_root / "speech_to_speech", symlinks=False)
+        shutil.copytree(src / "frontend", app_root / "frontend", symlinks=False)
         if experiment:
             exp_src = src / "deploy" / "experiment"
             if not exp_src.is_dir():
@@ -91,8 +107,9 @@ def build_artifact(output_dir: Path, commit: str | None = None, experiment: bool
     with tempfile.TemporaryDirectory(prefix="s2s_build_") as tmp:
         tmpdir = Path(tmp)
         materialize_from_commit(commit, tmpdir, experiment=experiment)
-        pkg_dir = tmpdir / "speech_to_speech"
-        frontend_dir = tmpdir / "frontend"
+        app_root = tmpdir / RELEASE_DIRNAME if experiment else tmpdir
+        pkg_dir = app_root / "speech_to_speech"
+        frontend_dir = app_root / "frontend"
         experiment_dir = tmpdir / EXPERIMENT_PAYLOAD_DIRNAME if experiment else None
 
         # ---- Deterministic metadata ----
@@ -139,9 +156,10 @@ def build_artifact(output_dir: Path, commit: str | None = None, experiment: bool
         tar_buffer = io.BytesIO()
         with tarfile.open(fileobj=tar_buffer, mode="w", format=tarfile.PAX_FORMAT) as tar:
             # Add the top-level directories first
-            top_dirs = ["speech_to_speech", "frontend"]
             if experiment_dir is not None:
-                top_dirs.append(EXPERIMENT_PAYLOAD_DIRNAME)
+                top_dirs = [RELEASE_DIRNAME, EXPERIMENT_PAYLOAD_DIRNAME]
+            else:
+                top_dirs = ["speech_to_speech", "frontend"]
             for top_name in top_dirs:
                 top = tarfile.TarInfo(name=top_name)
                 top.type = tarfile.DIRTYPE
@@ -261,7 +279,14 @@ def _experiment_metadata(experiment_dir: Path, archive_sha: str, files: list[dic
         "built_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "release_tree_sha256": tree_digest,
         "expected_import_root": "<release_root>/release",
+        "layout": {
+            "extract_into": "<release_root>",
+            "release_tree": f"{RELEASE_DIRNAME}/",
+            "payload": f"{EXPERIMENT_PAYLOAD_DIRNAME}/",
+            "note": "one extraction into the release root yields both the import tree and the payload",
+        },
         "native_runner_path": f"{EXPERIMENT_PAYLOAD_DIRNAME}/run_tests",
+        "runtime_program": f"{EXPERIMENT_PAYLOAD_DIRNAME}/entrypoint",
         "runtime_entrypoint": f"{EXPERIMENT_PAYLOAD_DIRNAME}/launch_experiment.sh",
         "runtime_args_path": f"{EXPERIMENT_PAYLOAD_DIRNAME}/runtime.args",
         "namespace_env_path": f"{EXPERIMENT_PAYLOAD_DIRNAME}/namespace.env",
