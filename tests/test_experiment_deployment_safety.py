@@ -461,8 +461,10 @@ def test_experiment_artifact_keeps_its_entrypoints_executable(tmp_path):
 
     assert modes["experiment/run_tests"] & 0o111, f"run_tests is not executable: {oct(modes['experiment/run_tests'])}"
     assert modes["experiment/launch_experiment.sh"] & 0o111
-    # everything else must stay 644, exactly as before this capability existed
-    assert modes["speech_to_speech/s2s_pipeline.py"] & 0o777 == 0o644
+    assert modes["experiment/entrypoint"] & 0o111
+    # everything else must stay 644, exactly as before this capability existed.
+    # The experiment layout nests the application tree under release/.
+    assert modes["release/speech_to_speech/s2s_pipeline.py"] & 0o777 == 0o644
     assert modes["experiment/namespace.env"] & 0o777 == 0o644
 
 

@@ -19,14 +19,14 @@ Governing rule: [`SERVER_IMMUTABILITY_RULE_v1.md`](SERVER_IMMUTABILITY_RULE_v1.m
 | Workstream | Artifact |
 |---|---|
 | A — immutability in governance | `docs/authority/SERVER_IMMUTABILITY_RULE_v1.md`; pointer added to `docs/authority/CURRENT_AUTHORITY.md` |
-| B — namespace contract | `deploy/experiment/namespace.env` |
+| B — namespace contract | `deploy/experiment/namespace.env` (templates) + `deploy/experiment/namespace.py` (the one materialization implementation) |
 | C — import-locus gate | `deploy/experiment/locus.py` |
-| D — runtime provenance order | `deploy/experiment/run_tests` (sets `PYTHONPATH`, then attests, then gates) |
+| D — runtime provenance order | `deploy/experiment/run_tests` (materializes the namespace, sets `PYTHONPATH`, attests, then gates) |
 | E — self-contained native gate | `deploy/experiment/native_gate.py` (stdlib only, gates G1–G10) |
 | F — websockets 12 compatibility | tests + a structural guard; see §7 |
 | G — manifest extension | `scripts/build_s2s_release.py --experiment` |
 | H — backup contract | §8 (defined, **not executed**) |
-| I — experimental launcher | `deploy/experiment/launch_experiment.sh` + `runtime.args` |
+| I — experimental launcher | `deploy/experiment/launch_experiment.sh` + `runtime.args` + `entrypoint` |
 
 All of it is inside the build: `--experiment` ships `deploy/experiment/` as
 `experiment/` inside the artifact.
@@ -41,14 +41,50 @@ files; Qwen3, VAD, STT, LLM, frontend, AEC and Core are untouched.
 ```text
 receive the immutable artifact
   → verify it (manifest SHA, archive SHA)
-  → materialize <release>/release/ and <release>/experiment/
-  → execute ONE repository-defined command:  <release>/experiment/run_tests --expected-sha <sha>
+  → extract ONCE into <release_root>/  giving  release/  and  experiment/
+  → execute ONE repository-defined command:  $EXPERIMENT_PYTHON <release>/experiment/run_tests --expected-sha <sha>
   → execute ONE repository-defined command:  <release>/experiment/launch_experiment.sh --expected-sha <sha>
   → emit runtime evidence
 ```
 
 Nothing else. No shell history, no retyped argument vector, no hand-built
 environment.
+
+### Artifact layout (R1)
+
+```text
+<artifact>.tar.gz
+├── release/
+│   ├── speech_to_speech/      ← the import tree
+│   └── frontend/
+└── experiment/                ← the repository-owned payload
+    ├── run_tests · native_gate.py · locus.py · namespace.py
+    ├── namespace.env · runtime.args
+    ├── entrypoint             ← the runtime program (R1)
+    └── launch_experiment.sh
+```
+
+Recorded in the manifest as `experiment.layout`. It exists so that **one**
+extraction into the release root produces exactly the structure both the runner
+and the launcher require. Previously the archive kept `speech_to_speech/` at its
+root, which meant `run_tests` could never locate its own release tree. The
+default (Golden) artifact layout is unchanged.
+
+### Interpreter binding (R1)
+
+Every direct invocation of executable logic goes through the absolute
+`EXPERIMENT_PYTHON`. Nothing depends on `PATH` or on a file's shebang, because
+the target's non-interactive shell resolves neither (P0D-0). A missing
+interpreter refuses with exit 69.
+
+### Runtime program (R1)
+
+`python -m speech_to_speech` is invalid — the package has no `__main__.py`. The
+historic `speech-to-speech` console script lives in site-packages, which the
+immutability rule forbids as a source of executable logic. The artifact therefore
+ships `experiment/entrypoint`, invoked as an explicit path, which calls
+`speech_to_speech.s2s_pipeline.main` in-process and prints the resolved module
+path so the runtime log carries provenance evidence rather than a promise.
 
 ---
 
@@ -178,9 +214,21 @@ being torn down anyway.
 Evidence:
 
 ```text
-websockets 15.0.1 : tests/test_experiment_deployment_safety.py        42 passed
+websockets 15.0.1 : tests/test_experiment_deployment_safety.py        58 passed
 websockets 12.0   : tests/test_experiment_deployment_safety.py +
-                    tests/test_elevenlabs_tts_handler.py               67 passed
+                    tests/test_elevenlabs_tts_handler.py               83 passed
+```
+
+Strongest form of the evidence — the **built artifact's own gate**, executed
+against the extracted artifact under an interpreter carrying `websockets 12.0`:
+
+```text
+[PASS] NAMESPACE  [PASS] G1  [PASS] G2  [PASS] G3  [PASS] G4  [PASS] G5
+[PASS] G6  [PASS] G7  [PASS] G8  [PASS] G9  [PASS] G10
+ALL GATES PASS
+
+G4 detail: websockets 12.0 (declared compatible: >=12,<16)
+G2 detail: import locus = <artifact>/release/speech_to_speech/__init__.py
 ```
 
 The 12.0 run used an isolated local venv (`/tmp/ws12venv`, local machine — never
@@ -311,10 +359,14 @@ SERVER_COMMANDS_EXECUTED: 0
 SERVER_MUTATIONS:         0
 
 IMMUTABILITY_RULE:            PASS   (doc + authority pointer + static tests)
-EXPERIMENT_NAMESPACE:         PASS   (namespace.env + gate precondition + tests)
+EXPERIMENT_NAMESPACE:         PASS   (one materialization impl; gate precondition satisfied end to end)
+NAMESPACE_MATERIALIZATION:    PASS   (templates → concrete roots; shared by runner and launcher)
+TARGET_INTERPRETER_BINDING:   PASS   (no PATH, no shebang; runs with an interpreter-free PATH)
+ARTIFACT_RUNTIME_ENTRYPOINT:  PASS   (artifact-owned entrypoint; args reach pipeline main)
 IMPORT_LOCUS_FAIL_CLOSED:     PASS   (locus.py; PASS/FAIL proven on 5 loci)
 SELF_CONTAINED_NATIVE_GATE:   PASS   (stdlib-only runner, G1-G10)
-WEBSOCKETS_12_COMPATIBILITY:  PASS   (67 passed under 12.0; 42 under 15.0.1)
+REAL_ARTIFACT_NATIVE_GATE:    PASS   (built artifact, executed from a clean cwd, no PYTHONPATH)
+WEBSOCKETS_12_COMPATIBILITY:  PASS   (83 passed under 12.0; 58 under 15.0.1)
 MANIFEST_EXTENSION:           PASS   (--experiment block; default build byte-identical)
 BACKUP_CONTRACT:              PASS   (defined, not executed)
 
