@@ -24,36 +24,70 @@ from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.arguments_classes.chat_completions_language_model_arguments import (
     ChatCompletionsLanguageModelHandlerArguments,
 )
-from speech_to_speech.arguments_classes.chat_tts_arguments import ChatTTSHandlerArguments
-from speech_to_speech.arguments_classes.elevenlabs_tts_arguments import ElevenLabsTTSHandlerArguments
-from speech_to_speech.arguments_classes.facebookmms_tts_arguments import FacebookMMSTTSHandlerArguments
+from speech_to_speech.arguments_classes.chat_tts_arguments import (
+    ChatTTSHandlerArguments,
+)
+from speech_to_speech.arguments_classes.elevenlabs_tts_arguments import (
+    ElevenLabsTTSHandlerArguments,
+)
+from speech_to_speech.arguments_classes.elevenlabs_scribe_stt_arguments import (
+    ElevenLabsScribeSTTHandlerArguments,
+)
+from speech_to_speech.arguments_classes.facebookmms_tts_arguments import (
+    FacebookMMSTTSHandlerArguments,
+)
 from speech_to_speech.arguments_classes.faster_whisper_stt_arguments import (
     FasterWhisperSTTHandlerArguments,
 )
-from speech_to_speech.arguments_classes.kokoro_tts_arguments import KokoroTTSHandlerArguments
-from speech_to_speech.arguments_classes.language_model_arguments import LanguageModelHandlerArguments
+from speech_to_speech.arguments_classes.kokoro_tts_arguments import (
+    KokoroTTSHandlerArguments,
+)
+from speech_to_speech.arguments_classes.language_model_arguments import (
+    LanguageModelHandlerArguments,
+)
 from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import (
     MLXAudioWhisperSTTHandlerArguments,
 )
 from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
-from speech_to_speech.arguments_classes.paraformer_stt_arguments import ParaformerSTTHandlerArguments
+from speech_to_speech.arguments_classes.paraformer_stt_arguments import (
+    ParaformerSTTHandlerArguments,
+)
 from speech_to_speech.arguments_classes.parakeet_tdt_arguments import (
     ParakeetTDTSTTHandlerArguments,
 )
-from speech_to_speech.arguments_classes.pocket_tts_arguments import PocketTTSHandlerArguments
-from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandlerArguments
+from speech_to_speech.arguments_classes.pocket_tts_arguments import (
+    PocketTTSHandlerArguments,
+)
+from speech_to_speech.arguments_classes.qwen3_tts_arguments import (
+    Qwen3TTSHandlerArguments,
+)
 from speech_to_speech.arguments_classes.responses_api_language_model_arguments import (
     ResponsesApiLanguageModelHandlerArguments,
 )
-from speech_to_speech.arguments_classes.socket_receiver_arguments import SocketReceiverArguments
-from speech_to_speech.arguments_classes.socket_sender_arguments import SocketSenderArguments
+from speech_to_speech.arguments_classes.socket_receiver_arguments import (
+    SocketReceiverArguments,
+)
+from speech_to_speech.arguments_classes.socket_sender_arguments import (
+    SocketSenderArguments,
+)
 from speech_to_speech.arguments_classes.vad_arguments import VADHandlerArguments
-from speech_to_speech.arguments_classes.websocket_streamer_arguments import WebSocketStreamerArguments
-from speech_to_speech.arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
+from speech_to_speech.arguments_classes.websocket_streamer_arguments import (
+    WebSocketStreamerArguments,
+)
+from speech_to_speech.arguments_classes.whisper_stt_arguments import (
+    WhisperSTTHandlerArguments,
+)
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.chat import Chat
 from speech_to_speech.pipeline.cancel_scope import CancelScope
-from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut, STTIn, STTOut, TTSIn, TTSOut
+from speech_to_speech.pipeline.handler_types import (
+    LLMIn,
+    LLMOut,
+    STTIn,
+    STTOut,
+    TTSIn,
+    TTSOut,
+)
 from speech_to_speech.pipeline.queue_types import (
     AudioInItem,
     AudioOutItem,
@@ -101,8 +135,11 @@ class ParsedArguments:
     faster_whisper_stt_handler_kwargs: FasterWhisperSTTHandlerArguments
     mlx_audio_whisper_stt_handler_kwargs: MLXAudioWhisperSTTHandlerArguments
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments
+    elevenlabs_scribe_stt_handler_kwargs: ElevenLabsScribeSTTHandlerArguments
     language_model_handler_kwargs: LanguageModelHandlerArguments
-    responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments
+    responses_api_language_model_handler_kwargs: (
+        ResponsesApiLanguageModelHandlerArguments
+    )
     chat_tts_handler_kwargs: ChatTTSHandlerArguments
     facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments
@@ -185,7 +222,11 @@ def parse_arguments() -> ParsedArguments:
         _backend = _pre.parse_known_args()[0].llm_backend
 
     _lm_class = _backend_lm_class.get(_backend, LanguageModelHandlerArguments)
-    logger.debug("LLM backend pre-parse: backend=%s, registering %s", _backend, _lm_class.__name__)
+    logger.debug(
+        "LLM backend pre-parse: backend=%s, registering %s",
+        _backend,
+        _lm_class.__name__,
+    )
 
     parser = HfArgumentParser(
         (  # type: ignore[arg-type]
@@ -199,6 +240,7 @@ def parse_arguments() -> ParsedArguments:
             FasterWhisperSTTHandlerArguments,
             MLXAudioWhisperSTTHandlerArguments,
             ParakeetTDTSTTHandlerArguments,
+            ElevenLabsScribeSTTHandlerArguments,
             _lm_class,
             ChatTTSHandlerArguments,
             FacebookMMSTTSHandlerArguments,
@@ -210,13 +252,17 @@ def parse_arguments() -> ParsedArguments:
     )
 
     if _is_json:
-        parsed = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]), allow_extra_keys=True)
+        parsed = parser.parse_json_file(
+            json_file=os.path.abspath(sys.argv[1]), allow_extra_keys=True
+        )
     else:
         parsed = parser.parse_args_into_dataclasses()
 
     # Build a {type: instance} lookup so field assignment is order-independent.
     by_type: dict[type, Any] = {type(obj): obj for obj in parsed}
-    logger.debug("Parsed %d argument classes: %s", len(by_type), [t.__name__ for t in by_type])
+    logger.debug(
+        "Parsed %d argument classes: %s", len(by_type), [t.__name__ for t in by_type]
+    )
 
     args = ParsedArguments(
         module_kwargs=by_type[ModuleArguments],
@@ -227,14 +273,24 @@ def parse_arguments() -> ParsedArguments:
         whisper_stt_handler_kwargs=by_type[WhisperSTTHandlerArguments],
         paraformer_stt_handler_kwargs=by_type[ParaformerSTTHandlerArguments],
         faster_whisper_stt_handler_kwargs=by_type[FasterWhisperSTTHandlerArguments],
-        mlx_audio_whisper_stt_handler_kwargs=by_type[MLXAudioWhisperSTTHandlerArguments],
+        mlx_audio_whisper_stt_handler_kwargs=by_type[
+            MLXAudioWhisperSTTHandlerArguments
+        ],
         parakeet_tdt_stt_handler_kwargs=by_type[ParakeetTDTSTTHandlerArguments],
-        language_model_handler_kwargs=by_type.get(LanguageModelHandlerArguments, LanguageModelHandlerArguments()),
+        elevenlabs_scribe_stt_handler_kwargs=by_type[
+            ElevenLabsScribeSTTHandlerArguments
+        ],
+        language_model_handler_kwargs=by_type.get(
+            LanguageModelHandlerArguments, LanguageModelHandlerArguments()
+        ),
         # The OpenAI-compatible slot holds whichever class was registered:
         # ChatCompletions... (a subclass) for chat-completions, else ResponsesApi....
         responses_api_language_model_handler_kwargs=by_type.get(
             ChatCompletionsLanguageModelHandlerArguments,
-            by_type.get(ResponsesApiLanguageModelHandlerArguments, ResponsesApiLanguageModelHandlerArguments()),
+            by_type.get(
+                ResponsesApiLanguageModelHandlerArguments,
+                ResponsesApiLanguageModelHandlerArguments(),
+            ),
         ),
         chat_tts_handler_kwargs=by_type[ChatTTSHandlerArguments],
         facebook_mms_tts_handler_kwargs=by_type[FacebookMMSTTSHandlerArguments],
@@ -293,7 +349,9 @@ def optimal_mac_settings(mac_optimal_settings: bool, *handler_kwargs: Any) -> No
 def check_mac_settings(module_kwargs: ModuleArguments) -> None:
     if platform == "darwin":
         if module_kwargs.device == "cuda":
-            raise ValueError("Cannot use CUDA on macOS. Please set the device to 'cpu' or 'mps'.")
+            raise ValueError(
+                "Cannot use CUDA on macOS. Please set the device to 'cpu' or 'mps'."
+            )
         if module_kwargs.llm_backend != "mlx-lm":
             logger.warning(
                 "For macOS users, it is recommended to use mlx-lm. You can activate it by passing --llm_backend mlx-lm."
@@ -304,7 +362,9 @@ def check_mac_settings(module_kwargs: ModuleArguments) -> None:
             )
 
 
-def overwrite_device_argument(common_device: Optional[str], *handler_kwargs: Any) -> None:
+def overwrite_device_argument(
+    common_device: Optional[str], *handler_kwargs: Any
+) -> None:
     if common_device:
         for kwargs in handler_kwargs:
             if hasattr(kwargs, "llm_device"):
@@ -322,11 +382,15 @@ def overwrite_device_argument(common_device: Optional[str], *handler_kwargs: Any
 
 
 def prepare_module_args(module_kwargs: ModuleArguments, *handler_kwargs: Any) -> None:
-    optimal_mac_settings(module_kwargs.local_mac_optimal_settings, module_kwargs, *handler_kwargs)
+    optimal_mac_settings(
+        module_kwargs.local_mac_optimal_settings, module_kwargs, *handler_kwargs
+    )
     if module_kwargs.tts is None:
         module_kwargs.tts = "qwen3"
     if module_kwargs.stt == "none" and module_kwargs.llm_backend != "chat-completions":
-        raise ValueError("--stt none requires --llm_backend chat-completions for audio-input LLM requests.")
+        raise ValueError(
+            "--stt none requires --llm_backend chat-completions for audio-input LLM requests."
+        )
     if platform == "darwin":
         check_mac_settings(module_kwargs)
     overwrite_device_argument(module_kwargs.device, *handler_kwargs)
@@ -339,6 +403,7 @@ def prepare_all_args(
     faster_whisper_stt_handler_kwargs: FasterWhisperSTTHandlerArguments,
     mlx_audio_whisper_stt_handler_kwargs: MLXAudioWhisperSTTHandlerArguments,
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
+    elevenlabs_scribe_stt_handler_kwargs: ElevenLabsScribeSTTHandlerArguments,
     language_model_handler_kwargs: LanguageModelHandlerArguments,
     responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
     chat_tts_handler_kwargs: ChatTTSHandlerArguments,
@@ -355,6 +420,7 @@ def prepare_all_args(
         paraformer_stt_handler_kwargs,
         mlx_audio_whisper_stt_handler_kwargs,
         parakeet_tdt_stt_handler_kwargs,
+        elevenlabs_scribe_stt_handler_kwargs,
         language_model_handler_kwargs,
         responses_api_language_model_handler_kwargs,
         chat_tts_handler_kwargs,
@@ -393,7 +459,9 @@ def initialize_queues_and_events() -> dict[str, Any]:
         "text_prompt_queue": Queue[TextPromptItem](),
         "lm_response_queue": Queue[LMOutItem](),
         "lm_processed_queue": Queue[TTSInItem](),  # NEW: LLM -> LM processor -> TTS
-        "text_output_queue": Queue[TextEventItem](),  # NEW: for text messages to WebSocket
+        "text_output_queue": Queue[
+            TextEventItem
+        ](),  # NEW: for text messages to WebSocket
     }
 
 
@@ -417,6 +485,7 @@ def _build_pipeline_handlers(
     paraformer_stt_handler_kwargs: ParaformerSTTHandlerArguments,
     mlx_audio_whisper_stt_handler_kwargs: MLXAudioWhisperSTTHandlerArguments,
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
+    elevenlabs_scribe_stt_handler_kwargs: ElevenLabsScribeSTTHandlerArguments,
     language_model_handler_kwargs: LanguageModelHandlerArguments,
     responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
     chat_tts_handler_kwargs: ChatTTSHandlerArguments,
@@ -453,7 +522,9 @@ def _build_pipeline_handlers(
                 queue_in=spoken_prompt_queue,
                 queue_out=text_prompt_queue,
                 setup_kwargs={
-                    "runtime_config": transcription_notifier_setup.get("runtime_config"),
+                    "runtime_config": transcription_notifier_setup.get(
+                        "runtime_config"
+                    ),
                     "should_listen": should_listen,
                     "sample_rate": vad_handler_kwargs.sample_rate,
                     "speculative_turns": speculative_turns,
@@ -480,6 +551,7 @@ def _build_pipeline_handlers(
             paraformer_stt_handler_kwargs,
             mlx_audio_whisper_stt_handler_kwargs,
             parakeet_tdt_stt_handler_kwargs,
+            elevenlabs_scribe_stt_handler_kwargs,
         )
         speech_input_handlers = [stt, transcription_notifier]
 
@@ -496,7 +568,10 @@ def _build_pipeline_handlers(
         stop_event,
         queue_in=lm_response_queue,
         queue_out=lm_processed_queue,
-        setup_kwargs={"text_output_queue": text_output_queue, "speculative_turns": speculative_turns},
+        setup_kwargs={
+            "text_output_queue": text_output_queue,
+            "speculative_turns": speculative_turns,
+        },
     )
 
     tts = get_tts_handler(
@@ -527,6 +602,7 @@ def _build_realtime_pipeline_unit(
     paraformer_stt_handler_kwargs: ParaformerSTTHandlerArguments,
     mlx_audio_whisper_stt_handler_kwargs: MLXAudioWhisperSTTHandlerArguments,
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
+    elevenlabs_scribe_stt_handler_kwargs: ElevenLabsScribeSTTHandlerArguments,
     language_model_handler_kwargs: LanguageModelHandlerArguments,
     responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
     chat_tts_handler_kwargs: ChatTTSHandlerArguments,
@@ -551,6 +627,7 @@ def _build_realtime_pipeline_unit(
     paraformer_kw = deepcopy(paraformer_stt_handler_kwargs)
     mlx_audio_whisper_kw = deepcopy(mlx_audio_whisper_stt_handler_kwargs)
     parakeet_kw = deepcopy(parakeet_tdt_stt_handler_kwargs)
+    elevenlabs_scribe_kw = deepcopy(elevenlabs_scribe_stt_handler_kwargs)
     lm_kw = deepcopy(language_model_handler_kwargs)
     responses_api_kw = deepcopy(responses_api_language_model_handler_kwargs)
     chat_tts_kw = deepcopy(chat_tts_handler_kwargs)
@@ -602,7 +679,9 @@ def _build_realtime_pipeline_unit(
 
     if module_kwargs.enable_live_transcription:
         vad_kw.enable_realtime_transcription = True
-        vad_kw.realtime_processing_pause = module_kwargs.live_transcription_update_interval
+        vad_kw.realtime_processing_pause = (
+            module_kwargs.live_transcription_update_interval
+        )
 
     handlers = _build_pipeline_handlers(
         stop_event=stop_event,
@@ -626,6 +705,7 @@ def _build_realtime_pipeline_unit(
         paraformer_stt_handler_kwargs=paraformer_kw,
         mlx_audio_whisper_stt_handler_kwargs=mlx_audio_whisper_kw,
         parakeet_tdt_stt_handler_kwargs=parakeet_kw,
+        elevenlabs_scribe_stt_handler_kwargs=elevenlabs_scribe_kw,
         language_model_handler_kwargs=lm_kw,
         responses_api_language_model_handler_kwargs=responses_api_kw,
         chat_tts_handler_kwargs=chat_tts_kw,
@@ -664,6 +744,7 @@ def build_pipeline(
     paraformer_stt_handler_kwargs: ParaformerSTTHandlerArguments,
     mlx_audio_whisper_stt_handler_kwargs: MLXAudioWhisperSTTHandlerArguments,
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
+    elevenlabs_scribe_stt_handler_kwargs: ElevenLabsScribeSTTHandlerArguments,
     language_model_handler_kwargs: LanguageModelHandlerArguments,
     responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
     chat_tts_handler_kwargs: ChatTTSHandlerArguments,
@@ -683,9 +764,7 @@ def build_pipeline(
     text_prompt_queue = queues_and_events["text_prompt_queue"]
     lm_response_queue = queues_and_events["lm_response_queue"]
     lm_processed_queue = queues_and_events["lm_processed_queue"]
-    text_output_queue = (
-        None  # Only set for raw WebSocket and Realtime modes; kept None otherwise to avoid unbounded queue growth
-    )
+    text_output_queue = None  # Only set for raw WebSocket and Realtime modes; kept None otherwise to avoid unbounded queue growth
 
     comms_handlers: list[Any] = []
     if module_kwargs.mode == "local":
@@ -739,7 +818,9 @@ def build_pipeline(
             for i in range(pool_size)
         ]
 
-        llm_proxy_config = build_llm_proxy_config(module_kwargs, responses_api_language_model_handler_kwargs)
+        llm_proxy_config = build_llm_proxy_config(
+            module_kwargs, responses_api_language_model_handler_kwargs
+        )
 
         realtime_server = RealtimeServer(
             stop_event=stop_event,
@@ -778,7 +859,9 @@ def build_pipeline(
     # Set VAD realtime transcription parameters from module_kwargs
     if module_kwargs.enable_live_transcription:
         vad_handler_kwargs.enable_realtime_transcription = True
-        vad_handler_kwargs.realtime_processing_pause = module_kwargs.live_transcription_update_interval
+        vad_handler_kwargs.realtime_processing_pause = (
+            module_kwargs.live_transcription_update_interval
+        )
 
     if module_kwargs.llm_backend in ("responses-api", "chat-completions"):
         _lm_vars = vars(responses_api_language_model_handler_kwargs)
@@ -815,6 +898,7 @@ def build_pipeline(
         paraformer_stt_handler_kwargs=paraformer_stt_handler_kwargs,
         mlx_audio_whisper_stt_handler_kwargs=mlx_audio_whisper_stt_handler_kwargs,
         parakeet_tdt_stt_handler_kwargs=parakeet_tdt_stt_handler_kwargs,
+        elevenlabs_scribe_stt_handler_kwargs=elevenlabs_scribe_stt_handler_kwargs,
         language_model_handler_kwargs=language_model_handler_kwargs,
         responses_api_language_model_handler_kwargs=responses_api_language_model_handler_kwargs,
         chat_tts_handler_kwargs=chat_tts_handler_kwargs,
@@ -839,8 +923,12 @@ def get_stt_handler(
     paraformer_stt_handler_kwargs: ParaformerSTTHandlerArguments,
     mlx_audio_whisper_stt_handler_kwargs: MLXAudioWhisperSTTHandlerArguments,
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
+    elevenlabs_scribe_stt_handler_kwargs: ElevenLabsScribeSTTHandlerArguments,
 ) -> BaseHandler[STTIn, STTOut]:
-    from speech_to_speech.STT.provider_factory import STTHandlerContext, create_stt_provider
+    from speech_to_speech.STT.provider_factory import (
+        STTHandlerContext,
+        create_stt_provider,
+    )
 
     return create_stt_provider(
         STTHandlerContext(
@@ -855,6 +943,7 @@ def get_stt_handler(
                 "faster_whisper_stt_handler_kwargs": faster_whisper_stt_handler_kwargs,
                 "mlx_audio_whisper_stt_handler_kwargs": mlx_audio_whisper_stt_handler_kwargs,
                 "parakeet_tdt_stt_handler_kwargs": parakeet_tdt_stt_handler_kwargs,
+                "elevenlabs_scribe_stt_handler_kwargs": elevenlabs_scribe_stt_handler_kwargs,
             },
         )
     )
@@ -869,7 +958,9 @@ def get_llm_handler(
     responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
 ) -> BaseHandler[LLMIn, LLMOut]:
     if module_kwargs.llm_backend == "responses-api":
-        from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
+        from speech_to_speech.LLM.responses_api_language_model import (
+            ResponsesApiModelHandler,
+        )
 
         return ResponsesApiModelHandler(
             stop_event,
@@ -879,7 +970,9 @@ def get_llm_handler(
         )
 
     if module_kwargs.llm_backend == "chat-completions":
-        from speech_to_speech.LLM.chat_completions_language_model import ChatCompletionsApiModelHandler
+        from speech_to_speech.LLM.chat_completions_language_model import (
+            ChatCompletionsApiModelHandler,
+        )
 
         # Reuses the responses-api argument class (identical fields: model_name,
         # base_url, api_key, stream, disable_thinking, ...).
@@ -914,7 +1007,9 @@ def get_llm_handler(
             setup_kwargs=lm_kwargs,
         )
 
-    raise ValueError("The LLM should be either transformers, mlx-lm, responses-api or chat-completions")
+    raise ValueError(
+        "The LLM should be either transformers, mlx-lm, responses-api or chat-completions"
+    )
 
 
 def get_tts_handler(
@@ -934,7 +1029,9 @@ def get_tts_handler(
         try:
             from speech_to_speech.TTS.chatTTS_handler import ChatTTSHandler
         except (ImportError, RuntimeError) as e:
-            logger.error('Error importing ChatTTSHandler. Install it with `pip install "speech-to-speech[chattts]"`.')
+            logger.error(
+                'Error importing ChatTTSHandler. Install it with `pip install "speech-to-speech[chattts]"`.'
+            )
             raise e
         return ChatTTSHandler(
             stop_event,
@@ -972,7 +1069,9 @@ def get_tts_handler(
         try:
             from speech_to_speech.TTS.kokoro_handler import KokoroTTSHandler
         except ImportError as e:
-            raise ImportError('Kokoro is optional. Install it with `pip install "speech-to-speech[kokoro]"`.') from e
+            raise ImportError(
+                'Kokoro is optional. Install it with `pip install "speech-to-speech[kokoro]"`.'
+            ) from e
 
         return KokoroTTSHandler(
             stop_event,
@@ -1002,7 +1101,9 @@ def get_tts_handler(
             setup_kwargs=vars(elevenlabs_tts_handler_kwargs),
         )
     else:
-        raise ValueError("The TTS should be either chatTTS, facebookMMS, pocket, kokoro, qwen3, or elevenlabs")
+        raise ValueError(
+            "The TTS should be either chatTTS, facebookMMS, pocket, kokoro, qwen3, or elevenlabs"
+        )
 
 
 def main() -> None:
@@ -1011,7 +1112,9 @@ def main() -> None:
     setup_logger(args.module_kwargs.log_level)
 
     if args.module_kwargs.num_pipelines < 1:
-        raise ValueError(f"--num_pipelines must be >= 1, got {args.module_kwargs.num_pipelines}")
+        raise ValueError(
+            f"--num_pipelines must be >= 1, got {args.module_kwargs.num_pipelines}"
+        )
 
     prepare_all_args(
         args.module_kwargs,
@@ -1020,6 +1123,7 @@ def main() -> None:
         args.faster_whisper_stt_handler_kwargs,
         args.mlx_audio_whisper_stt_handler_kwargs,
         args.parakeet_tdt_stt_handler_kwargs,
+        args.elevenlabs_scribe_stt_handler_kwargs,
         args.language_model_handler_kwargs,
         args.responses_api_language_model_handler_kwargs,
         args.chat_tts_handler_kwargs,
@@ -1045,7 +1149,11 @@ def main() -> None:
     # a flood of warnings without affecting final transcripts. With a pool, pre-emptively turn
     # it off so logs stay readable; the final STT path is unaffected. Non-darwin platforms
     # don't share this lock, so leave their live transcription alone.
-    if args.module_kwargs.num_pipelines > 1 and platform == "darwin" and args.module_kwargs.enable_live_transcription:
+    if (
+        args.module_kwargs.num_pipelines > 1
+        and platform == "darwin"
+        and args.module_kwargs.enable_live_transcription
+    ):
         logger.info(
             "MLX contention: --num_pipelines=%d > 1 on Apple Silicon → disabling live transcription "
             "(progressive STT contends on the global MLX lock)",
@@ -1066,6 +1174,7 @@ def main() -> None:
         args.paraformer_stt_handler_kwargs,
         args.mlx_audio_whisper_stt_handler_kwargs,
         args.parakeet_tdt_stt_handler_kwargs,
+        args.elevenlabs_scribe_stt_handler_kwargs,
         args.language_model_handler_kwargs,
         args.responses_api_language_model_handler_kwargs,
         args.chat_tts_handler_kwargs,

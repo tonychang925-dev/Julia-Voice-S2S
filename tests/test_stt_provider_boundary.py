@@ -253,6 +253,7 @@ def test_pipeline_orchestration_imports_with_cuda_disabled(
         "pipeline-selected",
         "pipeline-selected",
         "pipeline-selected",
+        "pipeline-selected",
     )
 
     assert pipeline.get_stt_handler is not None

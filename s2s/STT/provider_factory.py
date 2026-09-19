@@ -89,6 +89,11 @@ _STT_PROVIDER_SPECS: dict[str, STTProviderSpec] = {
         "ParakeetTDTSTTHandler",
         _parakeet_setup,
     ),
+    "elevenlabs-scribe": STTProviderSpec(
+        "speech_to_speech.STT.elevenlabs_scribe_handler",
+        "ElevenLabsScribeSTTHandler",
+        _plain_setup("elevenlabs_scribe_stt_handler_kwargs"),
+    ),
 }
 
 
@@ -100,7 +105,7 @@ def create_stt_provider(context: STTHandlerContext, selector: str | None = None)
         spec = _STT_PROVIDER_SPECS[selected_provider]
     except KeyError:
         raise ValueError(
-            "The STT should be either none, whisper, whisper-mlx, mlx-audio-whisper, faster-whisper, parakeet-tdt, or paraformer."
+            "The STT should be either none, whisper, whisper-mlx, mlx-audio-whisper, faster-whisper, parakeet-tdt, paraformer, or elevenlabs-scribe."
         ) from None
 
     handler_module = importlib.import_module(spec.module_path)
