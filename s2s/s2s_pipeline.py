@@ -806,6 +806,7 @@ def build_pipeline(
                 paraformer_stt_handler_kwargs=paraformer_stt_handler_kwargs,
                 mlx_audio_whisper_stt_handler_kwargs=mlx_audio_whisper_stt_handler_kwargs,
                 parakeet_tdt_stt_handler_kwargs=parakeet_tdt_stt_handler_kwargs,
+                elevenlabs_scribe_stt_handler_kwargs=elevenlabs_scribe_stt_handler_kwargs,
                 language_model_handler_kwargs=language_model_handler_kwargs,
                 responses_api_language_model_handler_kwargs=responses_api_language_model_handler_kwargs,
                 chat_tts_handler_kwargs=chat_tts_handler_kwargs,

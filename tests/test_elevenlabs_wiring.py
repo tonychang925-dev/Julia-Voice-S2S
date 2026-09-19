@@ -61,9 +61,9 @@ def _parse(argv):
     return P, P.parse_arguments()
 
 
-def _prepared(tts):
+def _prepared(tts, stt="parakeet-tdt"):
     """Full argument-preparation path, exactly as main() runs it."""
-    P, args = _parse(["--tts", tts])
+    P, args = _parse(["--stt", stt, "--tts", tts])
     P.prepare_all_args(
         args.module_kwargs,
         args.whisper_stt_handler_kwargs,
@@ -71,6 +71,7 @@ def _prepared(tts):
         args.faster_whisper_stt_handler_kwargs,
         args.mlx_audio_whisper_stt_handler_kwargs,
         args.parakeet_tdt_stt_handler_kwargs,
+        args.elevenlabs_scribe_stt_handler_kwargs,
         args.language_model_handler_kwargs,
         args.responses_api_language_model_handler_kwargs,
         args.chat_tts_handler_kwargs,
@@ -235,6 +236,7 @@ def _call_build_pipeline(P, args, queues_and_events):
         args.paraformer_stt_handler_kwargs,
         args.mlx_audio_whisper_stt_handler_kwargs,
         args.parakeet_tdt_stt_handler_kwargs,
+        args.elevenlabs_scribe_stt_handler_kwargs,
         args.language_model_handler_kwargs,
         args.responses_api_language_model_handler_kwargs,
         args.chat_tts_handler_kwargs,
@@ -247,15 +249,16 @@ def _call_build_pipeline(P, args, queues_and_events):
     )
 
 
-def test_r1_build_pipeline_realtime_forwards_elevenlabs_kwargs_to_the_unit_builder(monkeypatch):
-    """build_pipeline(mode=realtime) must hand the ElevenLabs argument object to
+def test_g3a_r2_p1_build_pipeline_realtime_forwards_scribe_kwargs_to_the_unit_builder(monkeypatch):
+    """build_pipeline(realtime, Scribe) must hand the Scribe argument object to
     _build_realtime_pipeline_unit. The callee requires it, so a missing kwarg is
-    a TypeError on the real topology — this asserts the call, not the source."""
+    a TypeError on the real topology — this asserts the actual call, not source."""
     P = _pipeline()
     # Must go through prepare_all_args(): build_llm_proxy_config() indexes the
     # post-rename keys, exactly as main() orders it.
-    _, args = _prepared("elevenlabs")
+    _, args = _prepared("elevenlabs", stt="elevenlabs-scribe")
     assert args.module_kwargs.mode == "realtime"
+    assert args.module_kwargs.stt == "elevenlabs-scribe"
 
     captured: dict[str, Any] = {}
 
@@ -271,6 +274,14 @@ def test_r1_build_pipeline_realtime_forwards_elevenlabs_kwargs_to_the_unit_build
         "the real _build_realtime_pipeline_unit would raise TypeError here"
     )
     assert captured["elevenlabs_tts_handler_kwargs"] is args.elevenlabs_tts_handler_kwargs
+    assert "elevenlabs_scribe_stt_handler_kwargs" in captured, (
+        "build_pipeline(realtime) dropped elevenlabs_scribe_stt_handler_kwargs — "
+        "the real _build_realtime_pipeline_unit would raise TypeError here"
+    )
+    assert (
+        captured["elevenlabs_scribe_stt_handler_kwargs"]
+        is args.elevenlabs_scribe_stt_handler_kwargs
+    )
 
 
 def test_r1_realtime_unit_really_constructs_the_elevenlabs_handler(monkeypatch):
@@ -307,6 +318,7 @@ def test_r1_realtime_unit_really_constructs_the_elevenlabs_handler(monkeypatch):
         paraformer_stt_handler_kwargs=args.paraformer_stt_handler_kwargs,
         mlx_audio_whisper_stt_handler_kwargs=args.mlx_audio_whisper_stt_handler_kwargs,
         parakeet_tdt_stt_handler_kwargs=args.parakeet_tdt_stt_handler_kwargs,
+        elevenlabs_scribe_stt_handler_kwargs=args.elevenlabs_scribe_stt_handler_kwargs,
         language_model_handler_kwargs=args.language_model_handler_kwargs,
         responses_api_language_model_handler_kwargs=args.responses_api_language_model_handler_kwargs,
         chat_tts_handler_kwargs=args.chat_tts_handler_kwargs,
@@ -327,4 +339,3 @@ def test_r1_realtime_unit_really_constructs_the_elevenlabs_handler(monkeypatch):
     assert handler.cancel_scope is unit.cancel_scope
     assert isinstance(handler.speculative_turns, _SentinelTracker)
     assert handler.output_format == "pcm_16000"
-
