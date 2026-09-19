@@ -840,92 +840,24 @@ def get_stt_handler(
     mlx_audio_whisper_stt_handler_kwargs: MLXAudioWhisperSTTHandlerArguments,
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
 ) -> BaseHandler[STTIn, STTOut]:
-    from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
+    from speech_to_speech.STT.provider_factory import STTHandlerContext, create_stt_provider
 
-    def with_speculative_turns(handler: BaseSTTHandler) -> BaseSTTHandler:
-        if speculative_turns is not None:
-            handler.speculative_turns = speculative_turns
-        return handler
-
-    if module_kwargs.stt == "whisper":
-        from speech_to_speech.STT.whisper_stt_handler import WhisperSTTHandler
-
-        return with_speculative_turns(
-            WhisperSTTHandler(
-                stop_event,
-                queue_in=spoken_prompt_queue,
-                queue_out=text_prompt_queue,
-                setup_kwargs=vars(whisper_stt_handler_kwargs),
-            )
+    return create_stt_provider(
+        STTHandlerContext(
+            stop_event=stop_event,
+            queue_in=spoken_prompt_queue,
+            queue_out=text_prompt_queue,
+            speculative_turns=speculative_turns,
+            module_kwargs=module_kwargs,
+            provider_kwargs={
+                "whisper_stt_handler_kwargs": whisper_stt_handler_kwargs,
+                "paraformer_stt_handler_kwargs": paraformer_stt_handler_kwargs,
+                "faster_whisper_stt_handler_kwargs": faster_whisper_stt_handler_kwargs,
+                "mlx_audio_whisper_stt_handler_kwargs": mlx_audio_whisper_stt_handler_kwargs,
+                "parakeet_tdt_stt_handler_kwargs": parakeet_tdt_stt_handler_kwargs,
+            },
         )
-    elif module_kwargs.stt == "whisper-mlx":
-        from speech_to_speech.STT.lightning_whisper_mlx_handler import LightningWhisperSTTHandler
-
-        return with_speculative_turns(
-            LightningWhisperSTTHandler(
-                stop_event,
-                queue_in=spoken_prompt_queue,
-                queue_out=text_prompt_queue,
-                setup_kwargs=vars(whisper_stt_handler_kwargs),
-            )
-        )
-    elif module_kwargs.stt == "mlx-audio-whisper":
-        from speech_to_speech.STT.mlx_audio_whisper_handler import MLXAudioWhisperSTTHandler
-
-        # Merge MLX Audio Whisper kwargs with shared language parameter from Whisper kwargs
-        setup_kwargs = {**vars(mlx_audio_whisper_stt_handler_kwargs), "language": whisper_stt_handler_kwargs.language}
-        return with_speculative_turns(
-            MLXAudioWhisperSTTHandler(
-                stop_event,
-                queue_in=spoken_prompt_queue,
-                queue_out=text_prompt_queue,
-                setup_kwargs=setup_kwargs,
-            )
-        )
-    elif module_kwargs.stt == "paraformer":
-        from speech_to_speech.STT.paraformer_handler import ParaformerSTTHandler
-
-        return with_speculative_turns(
-            ParaformerSTTHandler(
-                stop_event,
-                queue_in=spoken_prompt_queue,
-                queue_out=text_prompt_queue,
-                setup_kwargs=vars(paraformer_stt_handler_kwargs),
-            )
-        )
-    elif module_kwargs.stt == "faster-whisper":
-        from speech_to_speech.STT.faster_whisper_handler import FasterWhisperSTTHandler
-
-        return with_speculative_turns(
-            FasterWhisperSTTHandler(
-                stop_event,
-                queue_in=spoken_prompt_queue,
-                queue_out=text_prompt_queue,
-                setup_kwargs=vars(faster_whisper_stt_handler_kwargs),
-            )
-        )
-    elif module_kwargs.stt == "parakeet-tdt":
-        from speech_to_speech.STT.parakeet_tdt_handler import ParakeetTDTSTTHandler
-
-        # Add live transcription parameters to setup_kwargs
-        setup_kwargs = {
-            **vars(parakeet_tdt_stt_handler_kwargs),
-            "enable_live_transcription": module_kwargs.enable_live_transcription,
-            "live_transcription_update_interval": module_kwargs.live_transcription_update_interval,
-        }
-
-        return with_speculative_turns(
-            ParakeetTDTSTTHandler(
-                stop_event,
-                queue_in=spoken_prompt_queue,
-                queue_out=text_prompt_queue,
-                setup_kwargs=setup_kwargs,
-            )
-        )
-    else:
-        raise ValueError(
-            "The STT should be either none, whisper, whisper-mlx, mlx-audio-whisper, faster-whisper, parakeet-tdt, or paraformer."
-        )
+    )
 
 
 def get_llm_handler(
