@@ -69,9 +69,37 @@ def build_handler(stream: FakeScribeStream) -> ElevenLabsScribeSTTHandler:
     )
 
 
-def audio(mode: str, turn_id: str = "turn-a", revision: int = 2) -> VADAudio:
+def build_revision_handler() -> (
+    tuple[ElevenLabsScribeSTTHandler, list[FakeScribeStream]]
+):
+    streams: list[FakeScribeStream] = []
+
+    def factory(**kwargs: object) -> FakeScribeStream:
+        stream = FakeScribeStream()
+        streams.append(stream)
+        return stream
+
+    handler = ElevenLabsScribeSTTHandler(
+        Event(),
+        queue_in=Queue(),
+        queue_out=Queue(),
+        setup_kwargs={
+            "api_key": "test-key",
+            "response_timeout_s": 0.001,
+            "stream_factory": factory,
+        },
+    )
+    return handler, streams
+
+
+def audio(
+    mode: str,
+    turn_id: str = "turn-a",
+    revision: int = 2,
+    sample_count: int = 2,
+) -> VADAudio:
     return VADAudio(
-        audio=np.array([0.0, 0.5], dtype=np.float32),
+        audio=np.zeros(sample_count, dtype=np.float32),
         mode=mode,
         turn_id=turn_id,
         turn_revision=revision,
@@ -112,6 +140,66 @@ def test_pcm_conversion_boundaries() -> None:
     converted = float_pcm_to_pcm16_le(np.array([-2.0, -1.0, 0.0, 0.5, 1.0, 2.0]))
 
     assert converted == b"\x01\x80\x01\x80\x00\x00\x00\x40\xff\x7f\xff\x7f"
+
+
+def test_cumulative_progressive_audio_sends_each_sample_once() -> None:
+    stream = FakeScribeStream()
+    handler = build_handler(stream)
+
+    list(handler.process(audio("progressive", sample_count=1)))
+    list(handler.process(audio("progressive", sample_count=2)))
+    list(handler.process(audio("progressive", sample_count=3)))
+    stream.events.append({"message_type": "committed_transcript", "text": "final"})
+    list(handler.process(audio("final", sample_count=4)))
+
+    assert [len(payload) for payload, _ in stream.sent] == [2, 2, 2, 2]
+    assert [commit for _, commit in stream.sent] == [False, False, False, True]
+
+
+def test_final_without_progressive_sends_complete_audio_and_commits() -> None:
+    stream = FakeScribeStream([{"message_type": "committed_transcript", "text": "f"}])
+    handler = build_handler(stream)
+
+    list(handler.process(audio("final", sample_count=3)))
+
+    assert len(stream.sent[0][0]) == 6
+    assert stream.sent[0][1] is True
+
+
+def test_zero_delta_final_uses_empty_commit_message() -> None:
+    stream = FakeScribeStream()
+    handler = build_handler(stream)
+
+    list(handler.process(audio("progressive", sample_count=3)))
+    stream.events.append({"message_type": "committed_transcript", "text": "final"})
+    list(handler.process(audio("final", sample_count=3)))
+
+    assert len(stream.sent[0][0]) == 6
+    assert stream.sent[1] == (b"", True)
+
+
+def test_speculative_reopen_resends_full_revision_audio_independently() -> None:
+    handler, streams = build_revision_handler()
+
+    list(handler.process(audio("progressive", revision=0, sample_count=1)))
+    streams[0].events.append({"message_type": "committed_transcript", "text": "rev0"})
+    list(handler.process(audio("final", revision=0, sample_count=2)))
+    list(handler.process(audio("progressive", revision=1, sample_count=2)))
+    streams[1].events.append({"message_type": "committed_transcript", "text": "rev1"})
+    list(handler.process(audio("final", revision=1, sample_count=3)))
+
+    assert [len(payload) for payload, _ in streams[0].sent] == [2, 2]
+    assert [len(payload) for payload, _ in streams[1].sent] == [4, 2]
+
+
+def test_different_turns_reset_streaming_position_independently() -> None:
+    handler, streams = build_revision_handler()
+
+    list(handler.process(audio("progressive", turn_id="turn-a", sample_count=1)))
+    list(handler.process(audio("progressive", turn_id="turn-b", sample_count=3)))
+
+    assert streams[0].sent[0][0] == b"\x00\x00"
+    assert len(streams[1].sent[0][0]) == 6
 
 
 def test_partial_transcript_preserves_turn_identity() -> None:

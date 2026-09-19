@@ -304,6 +304,8 @@ class ElevenLabsScribeSTTHandler(BaseSTTHandler):
         self.response_timeout_s = response_timeout_s
         self.stream_factory = stream_factory or RealtimeScribeStream
         self.stream: ScribeStream | None = None
+        self.active_revision_key: tuple[str | None, int | None] | None = None
+        self.sent_sample_count = 0
         self.active_turn: tuple[str, int, float] | None = None
         self.pending_commits: deque[tuple[str, int, float]] = deque()
 
@@ -331,16 +333,32 @@ class ElevenLabsScribeSTTHandler(BaseSTTHandler):
             return None
         return vad_audio.turn_id, vad_audio.turn_revision, vad_audio.created_at_s
 
+    def _reset_for_revision(
+        self, turn_id: str | None, turn_revision: int | None
+    ) -> None:
+        revision_key = (turn_id, turn_revision)
+        if self.active_revision_key == revision_key:
+            return
+        if self.stream is not None:
+            self.stream.close()
+            self.stream = None
+        self.active_revision_key = revision_key
+        self.sent_sample_count = 0
+        self.pending_commits.clear()
+
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         context = self._context(vad_audio)
         if context is not None:
             self.active_turn = context
+        self._reset_for_revision(vad_audio.turn_id, vad_audio.turn_revision)
         stream = self._ensure_stream()
         is_final = vad_audio.mode == "final"
         if is_final and context is not None:
             self.pending_commits.append(context)
+        audio_delta = vad_audio.audio[self.sent_sample_count :]
+        self.sent_sample_count = len(vad_audio.audio)
         try:
-            stream.send_audio(float_pcm_to_pcm16_le(vad_audio.audio), commit=is_final)
+            stream.send_audio(float_pcm_to_pcm16_le(audio_delta), commit=is_final)
         except ScribeProviderError:
             if (
                 is_final
@@ -435,4 +453,6 @@ class ElevenLabsScribeSTTHandler(BaseSTTHandler):
             self.stream.close()
             self.stream = None
         self.active_turn = None
+        self.active_revision_key = None
+        self.sent_sample_count = 0
         self.pending_commits.clear()

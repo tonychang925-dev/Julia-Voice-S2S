@@ -52,3 +52,28 @@ With `CUDA_VISIBLE_DEVICES=""`, real provider-handler smoke testing established:
 The bounded 2.5-second Mandarin smoke sample was local, temporary evidence and
 is not retained as a benchmark corpus. The displayed text is raw provider
 output, not a quality judgment.
+
+## R1 cumulative audio correction
+
+Julia VAD remains cumulative. The Scribe adapter now tracks the transmitted
+sample count independently for each `(turn_id, turn_revision)` and sends only
+the unsent suffix. A reopened revision closes the prior provider-local stream,
+resets the sample counter, and submits that revision's complete cumulative
+candidate from its beginning. Julia turn and speculative-turn authority is
+unchanged.
+
+When a final cumulative frame has no unsent suffix, the adapter sends the
+provider-valid empty `input_audio_chunk` frame with `commit=true`. This exact
+strategy is used by the official Pipecat implementation and was verified against
+the real ElevenLabs Realtime endpoint.
+
+Real R1 progressive smoke, with `CUDA_VISIBLE_DEVICES=""`:
+
+- Cumulative source lengths: `32000, 40000, 40000` samples
+- Provider deltas: `32000, 8000, 0` samples
+- Final empty delta used `commit=true`
+- Total provider audio samples: `40000`
+- Partial transcript events: `2`
+- Manual committed transcript event: `1`
+- Raw committed text: `我刚才看了一下这个问题。我-我-`
+- Turn ID and revision remained `g2-r1-smoke-turn`, revision `0`
