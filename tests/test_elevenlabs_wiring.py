@@ -61,9 +61,9 @@ def _parse(argv):
     return P, P.parse_arguments()
 
 
-def _prepared(tts, stt="parakeet-tdt"):
+def _prepared(tts, stt="parakeet-tdt", extra_args=()):
     """Full argument-preparation path, exactly as main() runs it."""
-    P, args = _parse(["--stt", stt, "--tts", tts])
+    P, args = _parse(["--stt", stt, "--tts", tts, *extra_args])
     P.prepare_all_args(
         args.module_kwargs,
         args.whisper_stt_handler_kwargs,
@@ -282,6 +282,65 @@ def test_g3a_r2_p1_build_pipeline_realtime_forwards_scribe_kwargs_to_the_unit_bu
         captured["elevenlabs_scribe_stt_handler_kwargs"]
         is args.elevenlabs_scribe_stt_handler_kwargs
     )
+
+
+def test_g3a_r2_p2_prepare_all_args_normalizes_scribe_fields():
+    """prepare_all_args() must translate prefixed CLI fields to handler fields."""
+    _, args = _prepared(
+        "elevenlabs",
+        stt="elevenlabs-scribe",
+        extra_args=[
+            "--elevenlabs_scribe_api_key_env",
+            "ELEVENLABS_API_KEY",
+            "--elevenlabs_scribe_keyterms",
+            "Julia",
+            "--elevenlabs_scribe_response_timeout_s",
+            "9.5",
+        ],
+    )
+    scribe = args.elevenlabs_scribe_stt_handler_kwargs
+    assert scribe.api_key_env == "ELEVENLABS_API_KEY"
+    assert scribe.model_id == "scribe_v2_realtime"
+    assert scribe.language_code == "zh"
+    assert scribe.audio_format == "pcm_16000"
+    assert scribe.commit_strategy == "manual"
+    assert scribe.keyterms == ["Julia"]
+    assert scribe.response_timeout_s == 9.5
+    assert not [name for name in vars(scribe) if name.startswith("elevenlabs_scribe_")]
+
+
+def test_g3a_r2_p2_realtime_pipeline_sets_up_real_scribe_handler(monkeypatch):
+    """The real realtime/provider-factory boundary must construct Scribe setup."""
+    P = _pipeline()
+    _, args = _prepared(
+        "elevenlabs",
+        stt="elevenlabs-scribe",
+        extra_args=[
+            "--elevenlabs_scribe_api_key_env",
+            "ELEVENLABS_API_KEY",
+            "--elevenlabs_scribe_keyterms",
+            "Julia",
+            "--elevenlabs_scribe_response_timeout_s",
+            "9.5",
+        ],
+    )
+    monkeypatch.setattr(P, "VADHandler", lambda *a, **k: _FakeUnit())
+    monkeypatch.setattr(P, "get_llm_handler", lambda *a, **k: _FakeUnit())
+
+    manager = _call_build_pipeline(P, args, P.initialize_queues_and_events())
+    handlers = [
+        handler
+        for handler in manager.handlers
+        if type(handler).__name__ == "ElevenLabsScribeSTTHandler"
+    ]
+    assert len(handlers) == 1, f"expected one real Scribe handler, got {manager.handlers}"
+    handler = handlers[0]
+    assert handler.model_id == "scribe_v2_realtime"
+    assert handler.language_code == "zh"
+    assert handler.audio_format == "pcm_16000"
+    assert handler.commit_strategy == "manual"
+    assert handler.keyterms == ["Julia"]
+    assert handler.response_timeout_s == 9.5
 
 
 def test_r1_realtime_unit_really_constructs_the_elevenlabs_handler(monkeypatch):

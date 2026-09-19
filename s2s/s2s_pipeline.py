@@ -436,6 +436,7 @@ def prepare_all_args(
     rename_args(paraformer_stt_handler_kwargs, "paraformer_stt")
     rename_args(mlx_audio_whisper_stt_handler_kwargs, "mlx_audio_whisper")
     rename_args(parakeet_tdt_stt_handler_kwargs, "parakeet_tdt")
+    rename_args(elevenlabs_scribe_stt_handler_kwargs, "elevenlabs_scribe")
     rename_args(language_model_handler_kwargs, "llm")
     rename_args(responses_api_language_model_handler_kwargs, "responses_api")
     rename_args(chat_tts_handler_kwargs, "chat_tts")
