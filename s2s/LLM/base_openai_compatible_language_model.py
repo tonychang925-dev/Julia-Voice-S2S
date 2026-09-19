@@ -160,6 +160,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         disable_thinking: bool = True,
         reasoning_effort: Optional[str] = None,
         request_timeout_s: float = 20.0,
+        warmup_enabled: bool = True,
         stream_batch_sentences: int = 3,
         enable_lang_prompt: bool = False,
         compact_history: bool = False,
@@ -183,6 +184,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self.audio_content_type = audio_content_type
         self.audio_history_turns = max(0, audio_history_turns)
         self.request_timeout_s = float(request_timeout_s)
+        self.warmup_enabled = warmup_enabled
         self.request_timeout = httpx.Timeout(
             self.request_timeout_s,
             connect=min(10.0, self.request_timeout_s),
@@ -199,7 +201,10 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self._extra_body = self._build_extra_body(base_url, disable_thinking, reasoning_effort)
         self.compactor = build_compactor(self._build_compaction_generate_fn()) if compact_history else None
-        self.warmup()
+        if warmup_enabled:
+            self.warmup()
+        else:
+            logger.info("Skipping %s generation warmup", self.__class__.__name__)
 
     @staticmethod
     def _is_official_openai(base_url: Optional[str]) -> bool:
