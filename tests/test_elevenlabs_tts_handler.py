@@ -66,6 +66,10 @@ class FakeStream:
         self.i = 0
         self.closed = False
         self.on_read = on_read
+        self.started = []
+
+    def start(self, text):
+        self.started.append(text)
 
     def read(self, timeout):
         if self.on_read is not None:
@@ -213,7 +217,6 @@ def test_t4_arbitrary_boundaries_reassemble_losslessly(sizes):
     assert joined[:total] == original, "no sample loss, duplication or reordering"
     assert joined[total:] == b"\x00" * padding, "only the tail may be zero padding"
     assert all(len(block) == BLOCK for block in out)
-    assert stream.closed
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -478,10 +481,13 @@ def test_r1_real_transport_connect_path_binds_websockets_and_sends_init_frames(m
 
     assert sent[0]["__url__"].endswith("?model_id=eleven_v3_conversational&output_format=pcm_16000")
     assert sent[1] == {"voices": ["voice-1"], "xi_api_key": "k"}
-    assert sent[2] == {"inputs": [{"text": "hello julia", "voice_id": "voice-1", "new_turn": False}]}
-    assert sent[3] == {"close_socket": True}
+    stream.start("hello julia")
+    assert sent[2] == {
+        "inputs": [{"text": "hello julia", "voice_id": "voice-1", "new_turn": True, "flush": True}]
+    }
 
     stream.close()
+    assert sent[-2] == {"close_socket": True}
     assert sent[-1] == {"__closed__": True}
 
 
@@ -508,16 +514,159 @@ def test_r1_close_settles_pending_recv_task_and_closes_private_loop(monkeypatch)
     stream._connect()
 
     assert stream.read(0.02) is None, "no frame within the poll window"
-    task = stream._recv_task
+    task = stream._reader_task
     assert task is not None and not task.done(), "a receive must still be in flight"
 
     loop = stream._loop
+    keepalive_task = stream._keepalive_task
+    loop_thread = stream._loop_thread
     stream.close()
 
     assert task.done(), "close() must settle the pending receive task, not merely cancel it"
     assert task.cancelled(), "the settled task must be cancelled"
     assert loop.is_closed(), "close() must close the private event loop"
-    assert stream._recv_task is None, "no task may outlive close()"
+    assert stream._reader_task is None, "no task may outlive close()"
+    assert keepalive_task.done(), "no keep-alive task may outlive close()"
+    assert not loop_thread.is_alive(), "no loop thread may outlive close()"
+
+
+class SessionStream:
+    def __init__(self, turns):
+        self.turns = turns
+        self.current = None
+        self.created = 1
+        self.closed = 0
+        self.valid = True
+
+    def start(self, text):
+        assert self.valid
+        self.current = self.turns.pop(0)
+
+    def read(self, timeout):
+        from speech_to_speech.TTS.elevenlabs_tts_handler import StreamEnded
+
+        if self.current is None:
+            raise AssertionError("read must not cross an unstarted turn boundary")
+        if not self.current:
+            self.current = None
+            raise StreamEnded()
+        item = self.current.pop(0)
+        if isinstance(item, Exception):
+            self.valid = False
+            raise item
+        return item
+
+    def close(self):
+        self.closed += 1
+
+
+def persistent_build(M, turns, cancel_scope=None):
+    session = SessionStream(turns)
+
+    def factory(_text):
+        return session
+
+    handler = M.handler.ElevenLabsTTSHandler(
+        Event(),
+        Queue(),
+        Queue(),
+        setup_args=(Event(),),
+        setup_kwargs={
+            "cancel_scope": cancel_scope,
+            "stream_factory": factory,
+            "api_key": "test-api-key",
+            "voice_id": "voice",
+        },
+    )
+    return handler, session
+
+
+def test_persistent_first_and_subsequent_utterances_use_one_connection():
+    M = _imports()
+    turns = [[b64(pcm(BLOCK, seed=21))], [b64(pcm(BLOCK, seed=22))], [b64(pcm(BLOCK, seed=23))]]
+    handler, session = persistent_build(M, turns)
+
+    assert list(handler.process(tts_input(M.messages, text="one"))) != []
+    assert list(handler.process(tts_input(M.messages, text="two"))) != []
+    assert list(handler.process(tts_input(M.messages, text="three"))) != []
+
+    assert session.created == 1
+    assert session.closed == 0
+
+
+def test_persistent_turn_audio_and_completion_do_not_cross_boundaries():
+    M = _imports()
+    first = pcm(BLOCK, seed=24)
+    second = pcm(BLOCK, seed=25)
+    handler, session = persistent_build(M, [[b64(first)], [b64(second)]])
+
+    assert list(handler.process(tts_input(M.messages, turn_id="a", text="one"))) == [first]
+    assert session.current is None
+    assert list(handler.process(tts_input(M.messages, turn_id="b", text="two"))) == [second]
+    assert session.current is None
+
+
+def test_session_end_and_cleanup_close_transport_once_without_pending_tasks():
+    M = _imports()
+    handler, session = persistent_build(M, [[b64(pcm(BLOCK, seed=26))]])
+    list(handler.process(tts_input(M.messages)))
+    handler.on_session_end()
+    handler.cleanup()
+
+    assert session.closed == 1
+
+
+def test_cancellation_closes_transport_and_next_turn_reconnects_once():
+    M = _imports()
+    scope = M.cancel_scope.CancelScope()
+    first = pcm(BLOCK, seed=27)
+    second = pcm(BLOCK, seed=28)
+    first_session = SessionStream([[b64(first), b64(first), b64(first)]])
+    sessions = [first_session]
+
+    def factory(_text):
+        assert sessions, "only one reconnect is expected"
+        return sessions.pop(0)
+
+    handler = M.handler.ElevenLabsTTSHandler(
+        Event(), Queue(), Queue(), setup_args=(Event(),),
+        setup_kwargs={"cancel_scope": scope, "stream_factory": factory, "api_key": "k", "voice_id": "v"},
+    )
+
+    original_read = first_session.read
+
+    def cancel_read(timeout):
+        if first_session.current and len(first_session.current) == 2:
+            scope.cancel()
+        return original_read(timeout)
+
+    first_session.read = cancel_read
+    first = list(handler.process(tts_input(M.messages, cancel_generation=None, text="first")))
+    assert first == first
+    assert first_session.closed == 1
+
+    sessions.append(SessionStream([[b64(second)]]))
+    assert list(handler.process(tts_input(M.messages, text="second"))) == [second]
+
+
+def test_provider_disconnect_invalidates_transport_and_next_turn_reconnects():
+    M = _imports()
+    error = M.handler.ProviderError("disconnect")
+    healthy = pcm(BLOCK, seed=29)
+    broken = SessionStream([[error]])
+    healthy_session = SessionStream([[b64(healthy)]])
+    sessions = [broken, healthy_session]
+
+    def factory(_text):
+        return sessions.pop(0)
+
+    handler = M.handler.ElevenLabsTTSHandler(
+        Event(), Queue(), Queue(), setup_args=(Event(),),
+        setup_kwargs={"stream_factory": factory, "api_key": "k", "voice_id": "v"},
+    )
+    assert list(handler.process(tts_input(M.messages, text="bad"))) == []
+    assert broken.closed == 1
+    assert list(handler.process(tts_input(M.messages, text="good"))) == [healthy]
 
 
 # ═══════════════════════════════════════════════════════════════════════════

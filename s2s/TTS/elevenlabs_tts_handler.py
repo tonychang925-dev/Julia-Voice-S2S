@@ -49,7 +49,9 @@ import json
 import logging
 import os
 from collections.abc import Callable, Iterator
+from queue import Empty, Queue
 from threading import Event
+from threading import Lock, Thread
 from time import perf_counter
 from typing import Any, Optional, Protocol
 
@@ -78,6 +80,8 @@ DEFAULT_CONNECT_TIMEOUT_S = 20.0
 DEFAULT_RECV_POLL_S = 0.05
 """How long one synchronous ``read`` may block before returning to the caller so
 cancellation can be observed. Bounds cancellation latency during a network wait."""
+DEFAULT_KEEPALIVE_S = 10.0
+"""Interval for provider keep-alive frames while a session socket is idle."""
 
 
 class ProviderError(RuntimeError):
@@ -105,6 +109,10 @@ class DialogueStream(Protocol):
         Raises :class:`StreamEnded` when the utterance is complete and
         :class:`ProviderError` on any provider/transport failure.
         """
+        ...
+
+    def start(self, text: str) -> None:
+        """Send one utterance over the session transport."""
         ...
 
     def close(self) -> None:
@@ -135,16 +143,17 @@ def _import_websockets() -> Any:
 
 
 class ElevenLabsDialogueStream:
-    """One per-utterance Text-to-Dialogue WebSocket.
+    """One session-lifetime Text-to-Dialogue WebSocket.
 
-    Lifecycle is deliberately **per utterance** (connect → synthesize → close):
-    it keeps cancellation semantics trivial and leaves no long-lived socket or
-    background task that could outlive a session. Persistent / multi-context
-    sockets are a later optimisation, not a P0A requirement.
+    One connection and one private event loop serve all utterances in a Voice
+    session. A reader task and keep-alive task run on that loop; the synchronous
+    handler boundary consumes decoded provider frames from a handoff queue.
+    Normal utterances use ``new_turn`` and ``flush`` while leaving the
+    socket open; ``close_socket`` is reserved for teardown.
 
-    A *private* event loop is created for the connection and closed with it.
-    No process-wide loop state is read or mutated, and no thread is spawned —
-    every await is driven explicitly by :meth:`read` / :meth:`close`.
+    The loop is owned by a dedicated daemon thread so the provider's 20-second
+    inactivity timer is reset even while no utterance is being read. ``close``
+    is idempotent and settles both tasks before closing the loop.
     """
 
     def __init__(
@@ -157,16 +166,21 @@ class ElevenLabsDialogueStream:
         model_id: str = DEFAULT_MODEL_ID,
         output_format: str = DEFAULT_OUTPUT_FORMAT,
         connect_timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S,
+        keepalive_s: float = DEFAULT_KEEPALIVE_S,
     ) -> None:
-        self._text = text
         self._api_key = api_key
         self._voice_id = voice_id
         self._url = f"{ws_url}?model_id={model_id}&output_format={output_format}"
         self._connect_timeout_s = connect_timeout_s
+        self._keepalive_s = keepalive_s
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._ws_module: Any = None
         self._ws: Any = None
-        self._recv_task: Optional[asyncio.Future] = None
+        self._reader_task: Optional[asyncio.Future] = None
+        self._keepalive_task: Optional[asyncio.Future] = None
+        self._loop_thread: Optional[Thread] = None
+        self._frames: Queue[Any] = Queue()
+        self._close_lock = Lock()
         self._closed = False
 
     # ── connection ────────────────────────────────────────────────────
@@ -181,6 +195,14 @@ class ElevenLabsDialogueStream:
         self._loop = asyncio.new_event_loop()
         try:
             self._loop.run_until_complete(self._open())
+            self._reader_task = self._loop.create_task(self._receive_loop())
+            self._keepalive_task = self._loop.create_task(self._keepalive_loop())
+            self._loop_thread = Thread(
+                target=self._loop.run_forever,
+                name="elevenlabs-tts-session",
+                daemon=True,
+            )
+            self._loop_thread.start()
         except Exception as exc:  # noqa: BLE001 - normalised into ProviderError
             self.close()
             raise ProviderError(_scrub(f"ElevenLabs connect failed: {type(exc).__name__}: {exc}", self._api_key)) from exc
@@ -193,11 +215,41 @@ class ElevenLabsDialogueStream:
         )
         # Credentials travel as a message field, not a header and never in the URL.
         await self._ws.send(json.dumps({"voices": [self._voice_id], "xi_api_key": self._api_key}))
-        await self._ws.send(
-            json.dumps({"inputs": [{"text": self._text, "voice_id": self._voice_id, "new_turn": False}]})
-        )
-        await self._ws.send(json.dumps({"close_socket": True}))
         emit_current("TTS_CONNECTION_READY")
+
+    def start(self, text: str) -> None:
+        if self._closed:
+            raise StreamEnded()
+        if self._loop is None or self._ws is None:
+            emit_current("TTS_CONNECTION_START")
+            self._connect()
+            assert self._loop is not None and self._ws is not None
+        else:
+            emit_current("TTS_CONNECTION_REUSED")
+        future = asyncio.run_coroutine_threadsafe(
+            self._ws.send(
+                json.dumps(
+                    {
+                        "inputs": [
+                            {
+                                "text": text,
+                                "voice_id": self._voice_id,
+                                "new_turn": True,
+                                "flush": True,
+                            }
+                        ]
+                    }
+                )
+            ),
+            self._loop,
+        )
+        try:
+            future.result(self._connect_timeout_s)
+        except Exception as exc:
+            self.close()
+            raise ProviderError(
+                _scrub(f"ElevenLabs turn send failed: {type(exc).__name__}: {exc}", self._api_key)
+            ) from exc
         emit_current("T11_TTS_REQUEST_SENT")
 
     # ── reading ───────────────────────────────────────────────────────
@@ -208,15 +260,75 @@ class ElevenLabsDialogueStream:
         if self._loop is None:
             emit_current("TTS_CONNECTION_START")
             self._connect()
-        assert self._loop is not None
         try:
-            return self._loop.run_until_complete(self._read(timeout))
+            item = self._frames.get(timeout=timeout)
         except (ProviderError, StreamEnded):
             raise
+        except Empty:
+            return None
         except Exception as exc:  # noqa: BLE001
             raise ProviderError(
                 _scrub(f"ElevenLabs read failed: {type(exc).__name__}: {exc}", self._api_key)
             ) from exc
+        if isinstance(item, ProviderError):
+            raise item
+        if isinstance(item, StreamEnded):
+            raise item
+        return item
+
+    async def _keepalive_loop(self) -> None:
+        while not self._closed:
+            await asyncio.sleep(self._keepalive_s)
+            if self._closed or self._ws is None:
+                return
+            try:
+                await self._ws.send(json.dumps({"keep_alive": True}))
+            except Exception as exc:
+                self._put(ProviderError(_scrub(f"ElevenLabs keep-alive failed: {exc}", self._api_key)))
+                return
+
+    async def _receive_loop(self) -> None:
+        try:
+            while not self._closed:
+                raw = await self._ws.recv()
+                if isinstance(raw, (bytes, bytearray)):
+                    raise ProviderError(f"ElevenLabs returned a non-JSON frame ({len(raw)} bytes)")
+                try:
+                    msg = json.loads(raw)
+                except (ValueError, TypeError) as exc:
+                    raise ProviderError(f"ElevenLabs returned an unparsable frame: {exc}") from exc
+                if not isinstance(msg, dict):
+                    raise ProviderError("ElevenLabs returned a non-object frame")
+                if msg.get("error") or msg.get("message"):
+                    detail = json.dumps(
+                        {
+                            "error": msg.get("error"),
+                            "message": msg.get("message"),
+                            "code": msg.get("code"),
+                        }
+                    )
+                    raise ProviderError(_scrub(f"ElevenLabs provider error frame: {detail}", self._api_key))
+                audio = msg.get("audio")
+                if audio:
+                    self._put(audio)
+                elif msg.get("is_final"):
+                    self._put(StreamEnded())
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._put(ProviderError(_scrub(f"ElevenLabs receive failed: {exc}", self._api_key)))
+
+    def _put(self, item: Any) -> None:
+        while True:
+            try:
+                self._frames.put_nowait(item)
+                return
+            except Exception:
+                try:
+                    self._frames.get_nowait()
+                except Empty:
+                    pass
 
     async def _read(self, timeout: float) -> Optional[str]:
         if self._ws is None:
@@ -272,37 +384,63 @@ class ElevenLabsDialogueStream:
     # ── teardown ──────────────────────────────────────────────────────
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        emit_current("TTS_CONNECTION_CLOSE")
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            emit_current("TTS_CONNECTION_CLOSE")
 
-        loop, ws, task = self._loop, self._ws, self._recv_task
-        self._loop, self._ws, self._recv_task = None, None, None
+            loop = self._loop
+            thread = self._loop_thread
+            tasks = [self._reader_task, self._keepalive_task]
+            ws = self._ws
+            self._loop = None
+            self._loop_thread = None
+            self._reader_task = None
+            self._keepalive_task = None
+            self._ws = None
 
-        if loop is None:
-            return
-        try:
-            loop.run_until_complete(self._teardown(ws, task))
-        except Exception as exc:  # noqa: BLE001 - teardown must never mask the real error
-            logger.debug("ElevenLabs stream close raised (ignored): %s", _scrub(str(exc), self._api_key))
-        finally:
+            if loop is None or loop.is_closed():
+                return
             try:
-                loop.run_until_complete(loop.shutdown_asyncgens())
-            except Exception:  # noqa: BLE001
-                pass
-            loop.close()
+                if ws is not None:
+                    try:
+                        future = asyncio.run_coroutine_threadsafe(ws.send(json.dumps({"close_socket": True})), loop)
+                        future.result(1.0)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(
+                            "ElevenLabs close_socket send raised (ignored): %s",
+                            _scrub(str(exc), self._api_key),
+                        )
+                teardown = asyncio.run_coroutine_threadsafe(self._teardown(ws, tasks), loop)
+                teardown.result(2.0)
+                loop.call_soon_threadsafe(loop.stop)
+                if thread is not None:
+                    thread.join(timeout=2.0)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("ElevenLabs transport close raised (ignored): %s", _scrub(str(exc), self._api_key))
+            finally:
+                try:
+                    loop.run_until_complete(loop.shutdown_asyncgens())
+                except Exception:  # noqa: BLE001
+                    pass
+                loop.close()
 
-    async def _teardown(self, ws: Any, task: Optional[asyncio.Future]) -> None:
+    async def _teardown(self, ws: Any, tasks: list[Optional[asyncio.Future]]) -> None:
         """Settle the in-flight receive *before* the socket and the loop go away.
 
         A bare ``task.cancel()`` would leave the task pending across
         ``loop.close()``, so the invariant "no pending async task after close()"
         would not hold. Cancelling and then awaiting it settles the task.
         """
-        if task is not None:
-            if not task.done():
-                task.cancel()
+        active = [task for task in tasks if task is not None and not task.done()]
+        for task in active:
+            task.cancel()
+        if active:
+            await asyncio.wait(active)
+        for task in tasks:
+            if task is None:
+                continue
             try:
                 await task
             except asyncio.CancelledError:
@@ -336,6 +474,7 @@ class ElevenLabsTTSHandler(BaseHandler[TTSIn, TTSOut]):
         ws_url: str = DEFAULT_WS_URL,
         connect_timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S,
         recv_poll_s: float = DEFAULT_RECV_POLL_S,
+        keepalive_s: float = DEFAULT_KEEPALIVE_S,
         stream_factory: Callable[[str], DialogueStream] | None = None,
         gen_kwargs: dict[str, Any] | None = None,
     ) -> None:
@@ -353,6 +492,7 @@ class ElevenLabsTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.ws_url = ws_url
         self.connect_timeout_s = connect_timeout_s
         self.recv_poll_s = recv_poll_s
+        self.keepalive_s = keepalive_s
 
         # Key resolution: explicit argument wins, otherwise environment. Never a CLI arg.
         self._api_key = api_key or os.environ.get(api_key_env) or ""
@@ -374,6 +514,8 @@ class ElevenLabsTTSHandler(BaseHandler[TTSIn, TTSOut]):
     # ── provider lifecycle ────────────────────────────────────────────
 
     def _open_stream(self, text: str) -> DialogueStream:
+        if self._active_stream is not None:
+            return self._active_stream
         if self._stream_factory is not None:
             return self._stream_factory(text)
         if not self._api_key:
@@ -390,11 +532,13 @@ class ElevenLabsTTSHandler(BaseHandler[TTSIn, TTSOut]):
             model_id=self.model_id,
             output_format=self.output_format,
             connect_timeout_s=self.connect_timeout_s,
+            keepalive_s=self.keepalive_s,
         )
 
     def on_session_end(self) -> None:
-        """Soft reset. Per-utterance lifecycle leaves nothing to unwind."""
+        """Close the provider dialogue session."""
         logger.debug("ElevenLabsTTSHandler: session end")
+        self._close_active_stream()
 
     def cleanup(self) -> None:
         """Hard teardown. Idempotent; safe to call more than once."""
@@ -470,12 +614,14 @@ class ElevenLabsTTSHandler(BaseHandler[TTSIn, TTSOut]):
         chunk_count = 0
         first_audio_frame_received = False
         first_audio_at: float | None = None
+        provider_error = False
         started_at = perf_counter()
         set_current_turn(tts_input.turn_id, tts_input.turn_revision)
 
         try:
             try:
                 stream = self._open_stream(text)
+                stream.start(text)
             except ProviderError as exc:
                 logger.error(
                     "ElevenLabsTTSHandler: could not start synthesis turn=%s rev=%s: %s",
@@ -503,6 +649,7 @@ class ElevenLabsTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     emit_current("TTS_COMPLETE")
                     break
                 except ProviderError as exc:
+                    provider_error = True
                     logger.error(
                         "ElevenLabsTTSHandler: provider error turn=%s after %d chunk(s): %s",
                         tts_input.turn_id,
@@ -520,6 +667,7 @@ class ElevenLabsTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 try:
                     pcm = base64.b64decode(frame, validate=True)
                 except (binascii.Error, ValueError) as exc:
+                    provider_error = True
                     logger.error(
                         "ElevenLabsTTSHandler: base64 decode failed turn=%s chunk=%d: %s",
                         tts_input.turn_id,
@@ -565,12 +713,8 @@ class ElevenLabsTTSHandler(BaseHandler[TTSIn, TTSOut]):
                     yield bytes(carry)
                     emitted_blocks += 1
         finally:
-            self._active_stream = None
-            if stream is not None:
-                try:
-                    stream.close()
-                except Exception:  # noqa: BLE001
-                    logger.exception("ElevenLabsTTSHandler: stream close failed")
+            if cancelled or provider_error:
+                self._close_active_stream()
 
             logger.info(
                 "ElevenLabsTTSHandler: turn=%s rev=%s cancelled=%s chunks=%d received_bytes=%d "
