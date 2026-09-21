@@ -2,6 +2,8 @@ import json
 import logging
 import sys
 import types
+import time
+from threading import Event
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 import s2s
@@ -16,6 +18,7 @@ from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.chat_completions_language_model import _request_chat_completions
 from speech_to_speech.pipeline.latency import LatencyRecorder
 from speech_to_speech.pipeline.messages import AudioOutput, TTSInput
+from speech_to_speech.VAD.vad_handler import VADHandler
 
 
 def test_recorder_preserves_monotonic_order_and_correlation(caplog):
@@ -50,6 +53,29 @@ def test_audio_payload_is_unchanged_by_instrumentation():
     assert isinstance(output, AudioOutput)
     assert output.audio == b"pcm"
     assert output.turn_id == "turn-a"
+
+
+def test_vad_instrumentation_executes_before_audio_dispatch():
+    class SilentIterator:
+        triggered = False
+        buffer = []
+
+        def __call__(self, _audio):
+            return None
+
+    handler = object.__new__(VADHandler)
+    handler.should_listen = Event()
+    handler.should_listen.set()
+    handler.iterator = SilentIterator()
+    handler._apply_runtime_turn_detection = lambda _runtime_config: None
+    handler._discard_expired_pending_short_segment = lambda: None
+    handler._uses_realtime_turn_handling = lambda: False
+    handler._process_normal = lambda _vad_output, _runtime_config: iter(())
+    handler._log_chunks = 0
+    handler._total_samples = 0
+    handler._last_log_time = time.time()
+
+    assert list(handler.process(b"\x00" * 512)) == []
 
 
 def test_provider_request_kwargs_are_unchanged_by_trace_revision():

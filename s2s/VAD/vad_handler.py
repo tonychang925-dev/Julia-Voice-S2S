@@ -576,7 +576,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         runtime_config = None
         if isinstance(audio_chunk, tuple):
             audio_chunk, runtime_config = audio_chunk
-        frame_received_ns = perf_counter_ns()
+        frame_received_ns = time.perf_counter_ns()
         self._apply_runtime_turn_detection(runtime_config)
 
         if not self.should_listen.is_set():
