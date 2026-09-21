@@ -9,6 +9,7 @@ import wave
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator, Iterator
 from typing import Any, Literal, Optional
+from time import perf_counter_ns
 from urllib.parse import urlparse
 
 import httpx
@@ -41,6 +42,7 @@ from speech_to_speech.LLM.utils import remove_unspeechable, resolve_auto_languag
 from speech_to_speech.LLM.voice_prompt import build_voice_system_prompt
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
+from speech_to_speech.pipeline.latency import recorder, set_current_turn
 from speech_to_speech.pipeline.log_context import pipeline_log_ctx
 from speech_to_speech.pipeline.messages import (
     EndOfResponse,
@@ -198,7 +200,14 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             and self._is_local_base_url(base_url)
         ):
             api_key = "none"
+        client_create_start = perf_counter_ns()
+        recorder.emit("LLM_CLIENT_CREATE_START", turn_id=None, monotonic_ns=client_create_start)
         self.client = OpenAI(api_key=api_key, base_url=base_url)
+        recorder.emit(
+            "LLM_CLIENT_CREATE_END",
+            turn_id=None,
+            client_create_start_ns=client_create_start,
+        )
         self._extra_body = self._build_extra_body(base_url, disable_thinking, reasoning_effort)
         self.compactor = build_compactor(self._build_compaction_generate_fn()) if compact_history else None
         if warmup_enabled:
@@ -355,8 +364,11 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
     def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
         if self.speculative_turns is None:
+            recorder.emit_first("T3_TURN_FINALIZATION_DECISION", turn_id=turn_id, turn_revision=turn_revision)
             return True
-        return self.speculative_turns.is_latest_after_reopen_grace(turn_id, turn_revision)
+        allowed = self.speculative_turns.is_latest_after_reopen_grace(turn_id, turn_revision)
+        recorder.emit_first("T3_TURN_FINALIZATION_DECISION", turn_id=turn_id, turn_revision=turn_revision)
+        return allowed
 
     def _apply_config(
         self,
@@ -450,6 +462,11 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if not self._turn_output_allowed(turn.turn_id, turn.turn_revision):
                 logger.info("LLM generation cancelled (stale speculative turn)")
                 return
+            recorder.emit_first(
+                "T10_FIRST_TEXT_CHUNK_READY_FOR_TTS",
+                turn_id=turn.turn_id,
+                turn_revision=turn.turn_revision,
+            )
             yield self._chunk(turn, text=" ".join(batch))
 
         for event in events:
@@ -489,6 +506,11 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                             logger.info("LLM generation cancelled (stale speculative turn)")
                             cancelled = True
                             break
+                        recorder.emit_first(
+                            "T10_FIRST_TEXT_CHUNK_READY_FOR_TTS",
+                            turn_id=turn.turn_id,
+                            turn_revision=turn.turn_revision,
+                        )
                         yield self._chunk(turn, text=event.text)
                     continue
                 new_text = remove_unspeechable(event.text)
@@ -780,6 +802,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         # blocked read inside httpx cannot be aborted by cancel_scope.cancel() from
         # the websocket router. Mitigations: request_timeout_s / ReadTimeout.
         gen = self.cancel_scope.generation if self.cancel_scope else None
+        recorder.bind_conversation(turn_id, turn_revision, _runtime_conversation_id(runtime_config))
+        set_current_turn(turn_id, turn_revision)
         turn = _Turn(
             voice_trace_id=turn_id,
             language_code=language_code,
@@ -860,12 +884,16 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         # NOT canonical CRT turn identity. Popped before SDK call downstream.
         if turn_id:
             optional_kwargs["_voice_trace_id"] = turn_id
+        if turn_revision is not None:
+            optional_kwargs["_turn_revision"] = turn_revision
         optional_kwargs = self._augment_request_optional_kwargs(runtime_config, optional_kwargs)
 
         # CancelScope.is_stale(gen) is checked when the stream iterator advances; a
         # blocked read inside httpx cannot be aborted by cancel_scope.cancel() from
         # the websocket router. Mitigations: request_timeout_s / ReadTimeout.
         gen = self.cancel_scope.generation if self.cancel_scope else None
+        recorder.bind_conversation(turn_id, turn_revision, _runtime_conversation_id(runtime_config))
+        set_current_turn(turn_id, turn_revision)
 
         turn = _Turn(
             language_code=language_code,

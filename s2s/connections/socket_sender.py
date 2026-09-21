@@ -7,6 +7,7 @@ import numpy as np
 from rich.console import Console
 
 from speech_to_speech.pipeline.control import PipelineControlMessage
+from speech_to_speech.pipeline.latency import recorder
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
 from speech_to_speech.pipeline.queue_types import AudioOutItem
 
@@ -35,6 +36,7 @@ class SocketSender:
         self.port = port
 
     def run(self) -> None:
+        latency_turn: tuple[str, int | None] | None = None
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.socket.bind((self.host, self.port))
@@ -63,6 +65,21 @@ class SocketSender:
             else:
                 continue
             self.conn.sendall(payload)
+            if (
+                isinstance(audio_chunk, AudioOutput)
+                and audio_chunk.turn_id
+                and latency_turn is None
+            ):
+                latency_turn = (audio_chunk.turn_id, audio_chunk.turn_revision)
+                recorder.emit(
+                    "T14_FIRST_AUDIO_SENT_TO_CLIENT",
+                    turn_id=latency_turn[0],
+                    turn_revision=latency_turn[1],
+                )
+                recorder.finish(
+                    turn_id=latency_turn[0],
+                    turn_revision=latency_turn[1],
+                )
             if isinstance(audio_chunk, bytes) and audio_chunk == PIPELINE_END:
                 break
         self.conn.close()

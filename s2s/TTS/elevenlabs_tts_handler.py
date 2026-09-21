@@ -56,6 +56,7 @@ from typing import Any, Optional, Protocol
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
+from speech_to_speech.pipeline.latency import emit_current, recorder, set_current_turn
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, EndOfResponse, TTSInput
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
 
@@ -196,6 +197,8 @@ class ElevenLabsDialogueStream:
             json.dumps({"inputs": [{"text": self._text, "voice_id": self._voice_id, "new_turn": False}]})
         )
         await self._ws.send(json.dumps({"close_socket": True}))
+        emit_current("TTS_CONNECTION_READY")
+        emit_current("T11_TTS_REQUEST_SENT")
 
     # ── reading ───────────────────────────────────────────────────────
 
@@ -203,6 +206,7 @@ class ElevenLabsDialogueStream:
         if self._closed:
             raise StreamEnded()
         if self._loop is None:
+            emit_current("TTS_CONNECTION_START")
             self._connect()
         assert self._loop is not None
         try:
@@ -271,6 +275,7 @@ class ElevenLabsDialogueStream:
         if self._closed:
             return
         self._closed = True
+        emit_current("TTS_CONNECTION_CLOSE")
 
         loop, ws, task = self._loop, self._ws, self._recv_task
         self._loop, self._ws, self._recv_task = None, None, None
@@ -463,8 +468,10 @@ class ElevenLabsTTSHandler(BaseHandler[TTSIn, TTSOut]):
         received_bytes = 0
         emitted_blocks = 0
         chunk_count = 0
+        first_audio_frame_received = False
         first_audio_at: float | None = None
         started_at = perf_counter()
+        set_current_turn(tts_input.turn_id, tts_input.turn_revision)
 
         try:
             try:
@@ -493,6 +500,7 @@ class ElevenLabsTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 try:
                     frame = stream.read(self.recv_poll_s)
                 except StreamEnded:
+                    emit_current("TTS_COMPLETE")
                     break
                 except ProviderError as exc:
                     logger.error(
@@ -505,6 +513,9 @@ class ElevenLabsTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
                 if frame is None:
                     continue
+                if not first_audio_frame_received:
+                    first_audio_frame_received = True
+                    emit_current("T12_TTS_FIRST_AUDIO_RECEIVED")
 
                 try:
                     pcm = base64.b64decode(frame, validate=True)

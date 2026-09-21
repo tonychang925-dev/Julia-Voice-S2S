@@ -16,6 +16,7 @@ from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.events import SpeechStartedEvent, SpeechStoppedEvent
 from speech_to_speech.pipeline.handler_types import VADIn, VADOut
+from speech_to_speech.pipeline.latency import recorder
 from speech_to_speech.pipeline.messages import VADAudio
 from speech_to_speech.pipeline.queue_types import TextEventItem
 from speech_to_speech.pipeline.speculative_turns import SpeculativeTurnTracker
@@ -167,6 +168,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._last_final_audio_ms: int | None = None
         self._pending_reopen_candidate: tuple[str, int, int] | None = None
         self._pending_short_segment: _PendingShortSegment | None = None
+        self._last_speech_frame_ns: int | None = None
 
     @property
     def _audio_ms(self) -> int:
@@ -534,16 +536,22 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         """Return the response grace and pre-processing delay for this endpoint."""
         analyzer = getattr(self, "smart_turn_analyzer", None)
         if analyzer is None:
+            recorder.emit("SMART_TURN_INFERENCE_BEGIN", turn_id=self._current_turn_id, turn_revision=self._current_turn_revision)
+            recorder.emit("SMART_TURN_INFERENCE_END", turn_id=self._current_turn_id, turn_revision=self._current_turn_revision)
+            recorder.emit("T2_SMART_TURN_DECISION_COMPLETE", turn_id=self._current_turn_id, turn_revision=self._current_turn_revision, analyzer="disabled")
             return self.speculative_reopen_ms, 0
 
         try:
+            recorder.emit("SMART_TURN_INFERENCE_BEGIN", turn_id=self._current_turn_id, turn_revision=self._current_turn_revision)
             result = analyzer.predict(audio, sample_rate=self.sample_rate)
+            recorder.emit("SMART_TURN_INFERENCE_END", turn_id=self._current_turn_id, turn_revision=self._current_turn_revision)
         except Exception:
             # A transient classifier failure falls back to the ordinary short
             # speculative window instead of delaying the response for seconds.
             logger.exception("Smart Turn inference failed; using the default speculative reopen grace")
             return self.speculative_reopen_ms, 0
 
+        recorder.emit("T2_SMART_TURN_DECISION_COMPLETE", turn_id=self._current_turn_id, turn_revision=self._current_turn_revision, complete=result.complete)
         if result.complete:
             logger.info(
                 "Smart Turn: complete (p=%.3f, %.1fms); using %dms speculative reopen grace",
@@ -568,6 +576,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         runtime_config = None
         if isinstance(audio_chunk, tuple):
             audio_chunk, runtime_config = audio_chunk
+        frame_received_ns = perf_counter_ns()
         self._apply_runtime_turn_detection(runtime_config)
 
         if not self.should_listen.is_set():
@@ -583,6 +592,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
         # Deferred speech_started: only emit once active VAD speech reaches the valid speech threshold.
         is_triggered_now = self.iterator.triggered
+        if is_triggered_now:
+            self._last_speech_frame_ns = frame_received_ns
         if is_triggered_now and not self._speech_started_emitted:
             segment_samples = sum(len(t) for t in self.iterator.buffer)
             segment_duration_ms = segment_samples / self.sample_rate * 1000
@@ -680,6 +691,14 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
         # Handle end of speech
         if vad_output is not None:
+            if self._last_speech_frame_ns is not None:
+                recorder.emit(
+                    "T0_USER_LAST_SPEECH_FRAME",
+                    turn_id=self._current_turn_id,
+                    turn_revision=self._current_turn_revision,
+                    monotonic_ns=self._last_speech_frame_ns,
+                )
+            recorder.emit("T1_VAD_SPEECH_END", turn_id=self._current_turn_id, turn_revision=self._current_turn_revision)
             if len(vad_output) == 0:
                 logger.info("VAD: phantom trigger (empty buffer), closing speech pair")
                 if self._speech_started_emitted and self.text_output_queue:

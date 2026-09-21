@@ -10,7 +10,8 @@ from websockets.asyncio.server import ServerConnection
 
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import PipelineEvent
-from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
+from speech_to_speech.pipeline.latency import recorder
+from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END, AudioOutput
 from speech_to_speech.pipeline.queue_types import AudioInItem, AudioOutItem, TextEventItem
 
 logger = logging.getLogger(__name__)
@@ -154,6 +155,7 @@ class WebSocketStreamer:
         # Buffer audio until we have at least 100ms worth (3200 bytes = 1600 samples at 16kHz int16)
         MIN_AUDIO_BYTES = 3200
         audio_buffer = bytearray()
+        first_audio_turn: tuple[str, int | None] | None = None
 
         while not self.stop_event.is_set():
             try:
@@ -197,6 +199,8 @@ class WebSocketStreamer:
                             chunk_bytes = audio_chunk.tobytes()
                         else:
                             continue
+                        if isinstance(audio_chunk, AudioOutput) and audio_chunk.turn_id and first_audio_turn is None:
+                            first_audio_turn = (audio_chunk.turn_id, audio_chunk.turn_revision)
                         audio_buffer.extend(chunk_bytes)
 
                         if len(audio_buffer) >= MIN_AUDIO_BYTES:
@@ -206,6 +210,17 @@ class WebSocketStreamer:
                             await asyncio.gather(
                                 *[client.send(data) for client in self.clients], return_exceptions=True
                             )
+                            if first_audio_turn is not None:
+                                recorder.emit(
+                                    "T14_FIRST_AUDIO_SENT_TO_CLIENT",
+                                    turn_id=first_audio_turn[0],
+                                    turn_revision=first_audio_turn[1],
+                                )
+                                recorder.finish(
+                                    turn_id=first_audio_turn[0],
+                                    turn_revision=first_audio_turn[1],
+                                )
+                                first_audio_turn = None
                 except Empty:
                     # Flush any buffered audio when queue is empty
                     if audio_buffer and self.clients:
@@ -213,6 +228,17 @@ class WebSocketStreamer:
                         audio_buffer.clear()
                         logger.debug(f"Flushing {len(data)} bytes of audio to {len(self.clients)} client(s)")
                         await asyncio.gather(*[client.send(data) for client in self.clients], return_exceptions=True)
+                        if first_audio_turn is not None:
+                            recorder.emit(
+                                "T14_FIRST_AUDIO_SENT_TO_CLIENT",
+                                turn_id=first_audio_turn[0],
+                                turn_revision=first_audio_turn[1],
+                            )
+                            recorder.finish(
+                                turn_id=first_audio_turn[0],
+                                turn_revision=first_audio_turn[1],
+                            )
+                            first_audio_turn = None
 
                 # Check for text/tool messages
                 if self.text_output_queue:

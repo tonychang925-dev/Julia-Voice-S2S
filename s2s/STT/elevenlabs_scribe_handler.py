@@ -15,6 +15,7 @@ from urllib.parse import urlencode
 import numpy as np
 
 from speech_to_speech.pipeline.handler_types import STTIn, STTOut
+from speech_to_speech.pipeline.latency import recorder
 from speech_to_speech.pipeline.messages import (
     PartialTranscription,
     Transcription,
@@ -352,12 +353,28 @@ class ElevenLabsScribeSTTHandler(BaseSTTHandler):
             self.active_turn = context
         self._reset_for_revision(vad_audio.turn_id, vad_audio.turn_revision)
         stream = self._ensure_stream()
+        recorder.emit(
+            "SCRIBE_CONNECTION_READY",
+            turn_id=vad_audio.turn_id,
+            turn_revision=vad_audio.turn_revision,
+        )
         is_final = vad_audio.mode == "final"
         if is_final and context is not None:
             self.pending_commits.append(context)
         audio_delta = vad_audio.audio[self.sent_sample_count :]
         self.sent_sample_count = len(vad_audio.audio)
         try:
+            if is_final:
+                recorder.emit(
+                    "SCRIBE_LAST_AUDIO_SENT",
+                    turn_id=vad_audio.turn_id,
+                    turn_revision=vad_audio.turn_revision,
+                )
+                recorder.emit(
+                    "T4_SCRIBE_MANUAL_COMMIT_SENT",
+                    turn_id=vad_audio.turn_id,
+                    turn_revision=vad_audio.turn_revision,
+                )
             stream.send_audio(float_pcm_to_pcm16_le(audio_delta), commit=is_final)
         except ScribeProviderError:
             if (
@@ -380,6 +397,12 @@ class ElevenLabsScribeSTTHandler(BaseSTTHandler):
                     )
                 continue
             for output in self._event_to_outputs(event):
+                if is_final and event.get("message_type") == "committed_transcript":
+                    recorder.emit(
+                        "T5_SCRIBE_FINAL_RECEIVED",
+                        turn_id=vad_audio.turn_id,
+                        turn_revision=vad_audio.turn_revision,
+                    )
                 yield output
             if is_final and event.get("message_type") == "committed_transcript":
                 return

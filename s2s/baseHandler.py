@@ -12,7 +12,13 @@ import numpy as np
 
 from speech_to_speech.pipeline.control import PipelineControlMessage, is_control_message, SESSION_END
 from speech_to_speech.pipeline.log_context import pipeline_log_ctx
-from speech_to_speech.pipeline.messages import PIPELINE_END, AudioOutput, EndOfResponse
+from speech_to_speech.pipeline.latency import recorder
+from speech_to_speech.pipeline.messages import (
+    AUDIO_RESPONSE_DONE,
+    PIPELINE_END,
+    AudioOutput,
+    EndOfResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,9 +82,21 @@ class BaseHandler(Generic[InT, OutT]):
 
     def output_for_queue(self, output: OutT, source_input: InT) -> OutT | AudioOutput:
         cancel_generation = getattr(source_input, "cancel_generation", None)
-        if cancel_generation is not None and (isinstance(output, bytes) or hasattr(output, "tobytes")):
+        turn_id = getattr(source_input, "turn_id", None)
+        should_wrap_audio = cancel_generation is not None or turn_id is not None
+        if (
+            should_wrap_audio
+            and output != AUDIO_RESPONSE_DONE
+            and output != PIPELINE_END
+            and (isinstance(output, bytes) or hasattr(output, "tobytes"))
+        ):
             audio = cast(bytes | np.ndarray, output)
-            return AudioOutput(audio=audio, cancel_generation=cancel_generation)
+            return AudioOutput(
+                audio=audio,
+                cancel_generation=cancel_generation,
+                turn_id=turn_id,
+                turn_revision=getattr(source_input, "turn_revision", None),
+            )
         return output
 
     def run(self) -> None:
@@ -131,6 +149,12 @@ class BaseHandler(Generic[InT, OutT]):
                         OutT | PipelineControlMessage | bytes,
                         self.output_for_queue(output, typed_item),
                     )
+                    if isinstance(queued_output, AudioOutput) and queued_output.turn_id:
+                        recorder.emit_first(
+                            "T13_FIRST_AUDIO_ENQUEUED_FOR_PLAYBACK",
+                            turn_id=queued_output.turn_id,
+                            turn_revision=queued_output.turn_revision,
+                        )
                     self.queue_out.put(queued_output)
                     start_time = perf_counter()
             except Exception as e:

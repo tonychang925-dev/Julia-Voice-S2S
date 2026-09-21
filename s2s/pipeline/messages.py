@@ -139,6 +139,8 @@ class AudioOutput(PipelineMessage):
     tag: Literal["audio_output"] = "audio_output"
     audio: bytes | np.ndarray
     cancel_generation: int | None = None
+    turn_id: str | None = None
+    turn_revision: int | None = None
 
 
 # ── Realtime service → LLM ────────────────────────────────────────────
