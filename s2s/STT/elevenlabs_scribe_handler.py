@@ -309,6 +309,7 @@ class ElevenLabsScribeSTTHandler(BaseSTTHandler):
         self.sent_sample_count = 0
         self.active_turn: tuple[str, int, float] | None = None
         self.pending_commits: deque[tuple[str, int, float]] = deque()
+        self._current_conversation_id: str | None = None
 
     def _ensure_stream(self) -> ScribeStream:
         if self.stream is None:
@@ -316,6 +317,13 @@ class ElevenLabsScribeSTTHandler(BaseSTTHandler):
                 raise ScribeAuthenticationError(
                     "ElevenLabs Scribe API key is unavailable"
                 )
+            turn_id, turn_revision = self.active_revision_key or (None, None)
+            recorder.emit(
+                "SCRIBE_CONNECTION_START",
+                turn_id=turn_id,
+                turn_revision=turn_revision,
+                conversation_id=self._current_conversation_id,
+            )
             self.stream = self.stream_factory(
                 api_key=self.api_key,
                 ws_url=self.ws_url,
@@ -327,12 +335,35 @@ class ElevenLabsScribeSTTHandler(BaseSTTHandler):
                 connect_timeout_s=self.connect_timeout_s,
             )
             self.stream.connect()
+            recorder.emit(
+                "SCRIBE_CONNECTION_READY",
+                turn_id=turn_id,
+                turn_revision=turn_revision,
+                conversation_id=self._current_conversation_id,
+            )
+        else:
+            turn_id, turn_revision = self.active_revision_key or (None, None)
+            recorder.emit(
+                "SCRIBE_CONNECTION_REUSED",
+                turn_id=turn_id,
+                turn_revision=turn_revision,
+                conversation_id=self._current_conversation_id,
+            )
         return self.stream
 
     def _context(self, vad_audio: VADAudio) -> tuple[str, int, float] | None:
         if vad_audio.turn_id is None or vad_audio.turn_revision is None:
             return None
         return vad_audio.turn_id, vad_audio.turn_revision, vad_audio.created_at_s
+
+    @staticmethod
+    def _conversation_id(vad_audio: VADAudio) -> str | None:
+        session = getattr(vad_audio.runtime_config, "session", None)
+        metadata = getattr(session, "metadata", None)
+        if isinstance(metadata, dict):
+            conversation_id = str(metadata.get("conversation_id") or "").strip()
+            return conversation_id or None
+        return None
 
     def _reset_for_revision(
         self, turn_id: str | None, turn_revision: int | None
@@ -349,15 +380,11 @@ class ElevenLabsScribeSTTHandler(BaseSTTHandler):
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
         context = self._context(vad_audio)
+        self._current_conversation_id = self._conversation_id(vad_audio) or self._current_conversation_id
         if context is not None:
             self.active_turn = context
         self._reset_for_revision(vad_audio.turn_id, vad_audio.turn_revision)
         stream = self._ensure_stream()
-        recorder.emit(
-            "SCRIBE_CONNECTION_READY",
-            turn_id=vad_audio.turn_id,
-            turn_revision=vad_audio.turn_revision,
-        )
         is_final = vad_audio.mode == "final"
         if is_final and context is not None:
             self.pending_commits.append(context)
@@ -374,6 +401,12 @@ class ElevenLabsScribeSTTHandler(BaseSTTHandler):
                     "T4_SCRIBE_MANUAL_COMMIT_SENT",
                     turn_id=vad_audio.turn_id,
                     turn_revision=vad_audio.turn_revision,
+                )
+                recorder.emit(
+                    "SCRIBE_COMMIT_SENT",
+                    turn_id=vad_audio.turn_id,
+                    turn_revision=vad_audio.turn_revision,
+                    conversation_id=self._current_conversation_id,
                 )
             stream.send_audio(float_pcm_to_pcm16_le(audio_delta), commit=is_final)
         except ScribeProviderError:
@@ -402,6 +435,12 @@ class ElevenLabsScribeSTTHandler(BaseSTTHandler):
                         "T5_SCRIBE_FINAL_RECEIVED",
                         turn_id=vad_audio.turn_id,
                         turn_revision=vad_audio.turn_revision,
+                    )
+                    recorder.emit(
+                        "SCRIBE_FINAL_RECEIVED",
+                        turn_id=vad_audio.turn_id,
+                        turn_revision=vad_audio.turn_revision,
+                        conversation_id=self._current_conversation_id,
                     )
                 yield output
             if is_final and event.get("message_type") == "committed_transcript":

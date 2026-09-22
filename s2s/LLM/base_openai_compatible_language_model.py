@@ -364,10 +364,10 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
     def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
         if self.speculative_turns is None:
-            recorder.emit_first("T3_TURN_FINALIZATION_DECISION", turn_id=turn_id, turn_revision=turn_revision)
+            recorder.emit_first("LLM_OUTPUT_GATE_DECISION", turn_id=turn_id, turn_revision=turn_revision, output_allowed=True)
             return True
         allowed = self.speculative_turns.is_latest_after_reopen_grace(turn_id, turn_revision)
-        recorder.emit_first("T3_TURN_FINALIZATION_DECISION", turn_id=turn_id, turn_revision=turn_revision)
+        recorder.emit_first("LLM_OUTPUT_GATE_DECISION", turn_id=turn_id, turn_revision=turn_revision, output_allowed=allowed)
         return allowed
 
     def _apply_config(

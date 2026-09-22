@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import json
+import logging
 import types
 from queue import Empty, Queue
 from threading import Event
@@ -25,6 +27,7 @@ from speech_to_speech.pipeline.messages import (
     Transcription,
     VADAudio,
 )
+from speech_to_speech.api.openai_realtime.runtime_config import RuntimeConfig
 
 
 class FakeScribeStream:
@@ -97,12 +100,14 @@ def audio(
     turn_id: str = "turn-a",
     revision: int = 2,
     sample_count: int = 2,
+    runtime_config: object | None = None,
 ) -> VADAudio:
     return VADAudio(
         audio=np.zeros(sample_count, dtype=np.float32),
         mode=mode,
         turn_id=turn_id,
         turn_revision=revision,
+        runtime_config=runtime_config,
     )
 
 
@@ -154,6 +159,30 @@ def test_cumulative_progressive_audio_sends_each_sample_once() -> None:
 
     assert [len(payload) for payload, _ in stream.sent] == [2, 2, 2, 2]
     assert [commit for _, commit in stream.sent] == [False, False, False, True]
+
+
+def test_scribe_connection_and_finalization_events_preserve_order(caplog) -> None:
+    stream = FakeScribeStream()
+    handler = build_handler(stream)
+    runtime_config = RuntimeConfig(
+        session={"type": "realtime", "metadata": {"conversation_id": "conversation-a"}}
+    )
+
+    with caplog.at_level(logging.INFO, logger="julia.voice.latency"):
+        list(handler.process(audio("progressive", sample_count=1, runtime_config=runtime_config)))
+        stream.events.append({"message_type": "committed_transcript", "text": "final"})
+        list(handler.process(audio("final", sample_count=2, runtime_config=runtime_config)))
+
+    records = [
+        json.loads(line.removeprefix("LATENCY_EVENT "))
+        for line in caplog.messages
+        if line.startswith("LATENCY_EVENT ")
+    ]
+    events = [record["event"] for record in records]
+    assert events.index("SCRIBE_CONNECTION_START") < events.index("SCRIBE_CONNECTION_READY")
+    assert "SCRIBE_CONNECTION_REUSED" in events
+    assert events.index("SCRIBE_COMMIT_SENT") < events.index("SCRIBE_FINAL_RECEIVED")
+    assert all(record["conversation_id"] == "conversation-a" for record in records)
 
 
 def test_final_without_progressive_sends_complete_audio_and_commits() -> None:

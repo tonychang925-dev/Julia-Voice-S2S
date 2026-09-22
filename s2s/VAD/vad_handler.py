@@ -87,6 +87,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self.sample_rate = sample_rate
         self.min_silence_ms = min_silence_ms
         self.min_speech_ms = min_speech_ms
+        self.speech_pad_ms = speech_pad_ms
         self.min_speech_continuation_ms = self._resolve_min_speech_continuation_ms(
             self.min_speech_ms,
             min_speech_continuation_ms,
@@ -169,6 +170,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._pending_reopen_candidate: tuple[str, int, int] | None = None
         self._pending_short_segment: _PendingShortSegment | None = None
         self._last_speech_frame_ns: int | None = None
+        self._turn_reopen_counts: dict[str, int] = {}
+        self._current_conversation_id: str | None = None
 
     @property
     def _audio_ms(self) -> int:
@@ -328,6 +331,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             return None
         self._current_turn_id = turn_id
         self._current_turn_revision = candidate_revision
+        self._record_turn_reopen(turn_id, base_revision, candidate_revision)
         logger.info("VAD: reopened speculative turn %s revision %d", turn_id, candidate_revision)
         return turn_id, candidate_revision, True
 
@@ -350,8 +354,27 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
         self._current_turn_id = turn_id
         self._current_turn_revision = candidate_revision
+        self._record_turn_reopen(turn_id, base_revision, candidate_revision)
         logger.info("VAD: reopened speculative turn %s revision %d", turn_id, candidate_revision)
         return turn_id, candidate_revision, True
+
+    def _record_turn_reopen(self, turn_id: str, base_revision: int, candidate_revision: int) -> None:
+        reopen_count = self._turn_reopen_counts.get(turn_id, 0) + 1
+        self._turn_reopen_counts[turn_id] = reopen_count
+        recorder.emit(
+            "TURN_REOPEN",
+            turn_id=turn_id,
+            turn_revision=candidate_revision,
+            conversation_id=self._current_conversation_id,
+            base_turn_revision=base_revision,
+        )
+        recorder.emit(
+            "VAD_REOPEN_COUNT",
+            turn_id=turn_id,
+            turn_revision=candidate_revision,
+            conversation_id=self._current_conversation_id,
+            reopen_count=reopen_count,
+        )
 
     def _ensure_turn_for_speech_start(self, audio_start_ms: int) -> tuple[str, int, bool]:
         if (
@@ -381,6 +404,14 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
 
     def _current_turn_metadata(self) -> tuple[str | None, int | None]:
         return self._current_turn_id, self._current_turn_revision
+
+    def _bind_runtime_conversation(self, runtime_config: RuntimeConfig | None) -> None:
+        session = getattr(runtime_config, "session", None)
+        metadata = getattr(session, "metadata", None)
+        if isinstance(metadata, dict):
+            conversation_id = str(metadata.get("conversation_id") or "").strip()
+            if conversation_id:
+                self._current_conversation_id = conversation_id
 
     def _combined_turn_audio(self, current_segment: np.ndarray) -> np.ndarray:
         if self._speculative_audio_prefix is None:
@@ -539,6 +570,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             recorder.emit("SMART_TURN_INFERENCE_BEGIN", turn_id=self._current_turn_id, turn_revision=self._current_turn_revision)
             recorder.emit("SMART_TURN_INFERENCE_END", turn_id=self._current_turn_id, turn_revision=self._current_turn_revision)
             recorder.emit("T2_SMART_TURN_DECISION_COMPLETE", turn_id=self._current_turn_id, turn_revision=self._current_turn_revision, analyzer="disabled")
+            recorder.emit("SMART_TURN_DECISION_COMPLETE", turn_id=self._current_turn_id, turn_revision=self._current_turn_revision, turn_decision="disabled")
             return self.speculative_reopen_ms, 0
 
         try:
@@ -549,9 +581,17 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             # A transient classifier failure falls back to the ordinary short
             # speculative window instead of delaying the response for seconds.
             logger.exception("Smart Turn inference failed; using the default speculative reopen grace")
+            recorder.emit("SMART_TURN_DECISION_COMPLETE", turn_id=self._current_turn_id, turn_revision=self._current_turn_revision, turn_decision="inference_failure")
             return self.speculative_reopen_ms, 0
 
         recorder.emit("T2_SMART_TURN_DECISION_COMPLETE", turn_id=self._current_turn_id, turn_revision=self._current_turn_revision, complete=result.complete)
+        recorder.emit(
+            "SMART_TURN_DECISION_COMPLETE",
+            turn_id=self._current_turn_id,
+            turn_revision=self._current_turn_revision,
+            turn_decision="complete" if result.complete else "incomplete",
+            probability=result.probability,
+        )
         if result.complete:
             logger.info(
                 "Smart Turn: complete (p=%.3f, %.1fms); using %dms speculative reopen grace",
@@ -577,6 +617,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         if isinstance(audio_chunk, tuple):
             audio_chunk, runtime_config = audio_chunk
         frame_received_ns = time.perf_counter_ns()
+        self._bind_runtime_conversation(runtime_config)
         self._apply_runtime_turn_detection(runtime_config)
 
         if not self.should_listen.is_set():
@@ -692,13 +733,39 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         # Handle end of speech
         if vad_output is not None:
             if self._last_speech_frame_ns is not None:
+                silence_accumulated_ms = max(
+                    0.0,
+                    (time.perf_counter_ns() - self._last_speech_frame_ns) / 1_000_000,
+                )
                 recorder.emit(
                     "T0_USER_LAST_SPEECH_FRAME",
                     turn_id=self._current_turn_id,
                     turn_revision=self._current_turn_revision,
+                    conversation_id=self._current_conversation_id,
                     monotonic_ns=self._last_speech_frame_ns,
                 )
-            recorder.emit("T1_VAD_SPEECH_END", turn_id=self._current_turn_id, turn_revision=self._current_turn_revision)
+                recorder.emit(
+                    "INPUT_LAST_SPEECH_FRAME",
+                    turn_id=self._current_turn_id,
+                    turn_revision=self._current_turn_revision,
+                    conversation_id=self._current_conversation_id,
+                    monotonic_ns=self._last_speech_frame_ns,
+                )
+                recorder.emit(
+                    "VAD_SOFT_END",
+                    turn_id=self._current_turn_id,
+                    turn_revision=self._current_turn_revision,
+                    conversation_id=self._current_conversation_id,
+                    silence_accumulated_ms=round(silence_accumulated_ms, 3),
+                    min_silence_ms=self.min_silence_ms,
+                    speech_pad_ms=self.speech_pad_ms,
+                )
+                recorder.emit(
+                    "T1_VAD_SPEECH_END",
+                    turn_id=self._current_turn_id,
+                    turn_revision=self._current_turn_revision,
+                    conversation_id=self._current_conversation_id,
+                )
             if len(vad_output) == 0:
                 logger.info("VAD: phantom trigger (empty buffer), closing speech pair")
                 if self._speech_started_emitted and self.text_output_queue:

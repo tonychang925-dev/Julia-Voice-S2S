@@ -11,35 +11,49 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 import json
 import logging
+import os
+from pathlib import Path
 from threading import RLock
-from time import perf_counter_ns
+from time import perf_counter_ns, time_ns
 from typing import Any
 
 logger = logging.getLogger("julia.voice.latency")
 
 _MAX_TRACKED_TURNS = 256
 _SUMMARY_STAGES = (
-    ("speech_end_to_vad_ms", "T0_USER_LAST_SPEECH_FRAME", "T1_VAD_SPEECH_END"),
-    ("vad_to_smart_turn_ms", "T1_VAD_SPEECH_END", "T2_SMART_TURN_DECISION_COMPLETE"),
-    ("smart_turn_to_finalize_ms", "T2_SMART_TURN_DECISION_COMPLETE", "T3_TURN_FINALIZATION_DECISION"),
-    ("finalize_to_scribe_commit_ms", "T3_TURN_FINALIZATION_DECISION", "T4_SCRIBE_MANUAL_COMMIT_SENT"),
-    ("scribe_commit_to_final_ms", "T4_SCRIBE_MANUAL_COMMIT_SENT", "T5_SCRIBE_FINAL_RECEIVED"),
-    ("scribe_final_to_brain_request_ms", "T5_SCRIBE_FINAL_RECEIVED", "T6_BRAIN_REQUEST_SENT"),
-    ("brain_ingress_ms", "T6_BRAIN_REQUEST_SENT", "LLM_FIRST_CHUNK_RECEIVED"),
-    ("llm_first_token_ms", "T6_BRAIN_REQUEST_SENT", "LLM_FIRST_CHUNK_RECEIVED"),
+    ("input_last_speech_to_vad_soft_end_ms", "INPUT_LAST_SPEECH_FRAME", "VAD_SOFT_END"),
+    ("vad_soft_end_to_smart_turn_decision_ms", "VAD_SOFT_END", "SMART_TURN_DECISION_COMPLETE"),
+    ("smart_turn_to_grace_start_ms", "SMART_TURN_DECISION_COMPLETE", "TURN_GRACE_STARTED"),
+    ("grace_start_to_observed_expiry_ms", "TURN_GRACE_STARTED", "TURN_GRACE_EXPIRED"),
+    ("scribe_commit_to_final_ms", "SCRIBE_COMMIT_SENT", "SCRIBE_FINAL_RECEIVED"),
+    ("scribe_final_to_brain_request_ms", "SCRIBE_FINAL_RECEIVED", "BRAIN_REQUEST_SENT"),
+    ("input_last_speech_to_scribe_final_ms", "INPUT_LAST_SPEECH_FRAME", "SCRIBE_FINAL_RECEIVED"),
+    ("input_last_speech_to_brain_request_ms", "INPUT_LAST_SPEECH_FRAME", "BRAIN_REQUEST_SENT"),
+    ("brain_ingress_ms", "BRAIN_REQUEST_SENT", "LLM_FIRST_CHUNK_RECEIVED"),
+    ("llm_first_token_ms", "BRAIN_REQUEST_SENT", "LLM_FIRST_CHUNK_RECEIVED"),
     ("first_token_to_tts_request_ms", "T10_FIRST_TEXT_CHUNK_READY_FOR_TTS", "T11_TTS_REQUEST_SENT"),
     ("tts_ttfa_ms", "T11_TTS_REQUEST_SENT", "T12_TTS_FIRST_AUDIO_RECEIVED"),
     ("playback_handoff_ms", "T12_TTS_FIRST_AUDIO_RECEIVED", "T14_FIRST_AUDIO_SENT_TO_CLIENT"),
     ("speech_end_to_first_audio_ms", "T0_USER_LAST_SPEECH_FRAME", "T14_FIRST_AUDIO_SENT_TO_CLIENT"),
 )
+_EVENT_SINK_LOCK = RLock()
+
+
+def _default_event_path() -> Path:
+    configured = os.environ.get("JULIA_VOICE_LATENCY_EVENT_PATH")
+    if configured:
+        return Path(configured)
+    return Path(os.environ.get("TMPDIR", "/tmp")) / "julia-voice-latency-events.jsonl"
 
 
 class LatencyRecorder:
     """Thread-safe, bounded per-turn event collector."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, event_path: str | Path | None = None) -> None:
         self._lock = RLock()
         self._turns: OrderedDict[tuple[str, int | None], dict[str, Any]] = OrderedDict()
+        self.event_path = Path(event_path) if event_path is not None else _default_event_path()
+        self._sink_available = True
 
     def emit(
         self,
@@ -143,8 +157,8 @@ class LatencyRecorder:
             )
         return summary
 
-    @staticmethod
     def _log(
+        self,
         event: str,
         monotonic_ns: int,
         turn_id: str | None,
@@ -160,10 +174,27 @@ class LatencyRecorder:
             "turn_revision": turn_revision,
             "voice_trace_id": voice_trace_id,
             "monotonic_ns": monotonic_ns,
+            "timestamp_ns": time_ns(),
             "wall_time_iso": datetime.now(timezone.utc).isoformat(),
             **details,
         }
         logger.info("LATENCY_EVENT %s", json.dumps(record, separators=(",", ":"), ensure_ascii=False))
+        self._persist(record)
+
+    def _persist(self, record: dict[str, Any]) -> None:
+        payload = json.dumps(record, separators=(",", ":"), ensure_ascii=False) + "\n"
+        with _EVENT_SINK_LOCK:
+            try:
+                existed = self.event_path.exists()
+                with self.event_path.open("a", encoding="utf-8") as event_file:
+                    event_file.write(payload)
+                if not existed:
+                    self.event_path.chmod(0o600)
+                self._sink_available = True
+            except OSError:
+                if self._sink_available:
+                    logger.warning("Latency event persistence unavailable at %s", self.event_path)
+                self._sink_available = False
 
 
 recorder = LatencyRecorder()

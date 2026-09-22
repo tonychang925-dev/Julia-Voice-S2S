@@ -183,10 +183,12 @@ def _request_chat_completions(
     if stream:
         create_kwargs["stream_options"] = {"include_usage": True}
     request_conversation_id = ""
+    request_turn_id = ""
     request_voice_trace_id = ""
     request_turn_revision = None
     if isinstance(merged_extra_body, dict):
         request_conversation_id = str(merged_extra_body.get("conversation_id") or "").strip()
+        request_turn_id = str(merged_extra_body.get("turn_id") or "").strip()
         request_voice_trace_id = str(merged_extra_body.get("voice_trace_id") or "").strip()
         request_turn_revision = merged_extra_body.pop("_turn_revision", None)
     logger.info(
@@ -196,7 +198,13 @@ def _request_chat_completions(
     )
     recorder.emit(
         "T6_BRAIN_REQUEST_SENT",
-        turn_id=request_voice_trace_id or None,
+        turn_id=request_turn_id or request_voice_trace_id or None,
+        turn_revision=request_turn_revision if isinstance(request_turn_revision, int) else None,
+        conversation_id=request_conversation_id or None,
+    )
+    recorder.emit(
+        "BRAIN_REQUEST_SENT",
+        turn_id=request_turn_id or request_voice_trace_id or None,
         turn_revision=request_turn_revision if isinstance(request_turn_revision, int) else None,
         conversation_id=request_conversation_id or None,
     )

@@ -176,6 +176,13 @@ class SpeculativeTurnTracker:
                     turn_revision=revision,
                     duration_ms=grace_s * 1000,
                 )
+                recorder.emit(
+                    "TURN_GRACE_STARTED",
+                    turn_id=turn_id,
+                    turn_revision=revision,
+                    turn_grace_ms=grace_s * 1000,
+                    deadline_monotonic_ns=int(deadline * 1_000_000_000),
+                )
                 logger.debug(
                     "Started speculative reopen grace for turn %s revision %d: %.0fms",
                     turn_id,
@@ -357,11 +364,18 @@ class SpeculativeTurnTracker:
         if self._latest_revision.get(turn_id, revision) != revision:
             del self._reopen_grace[turn_id]
             recorder.emit("SPECULATIVE_GRACE_CANCEL", turn_id=turn_id, turn_revision=revision)
+            recorder.emit("TURN_GRACE_CANCEL", turn_id=turn_id, turn_revision=revision)
             return 0.0
         remaining = grace.deadline - time.monotonic()
         if remaining <= 0:
             del self._reopen_grace[turn_id]
             recorder.emit("SPECULATIVE_GRACE_EXPIRY", turn_id=turn_id, turn_revision=revision)
+            recorder.emit(
+                "TURN_GRACE_EXPIRED",
+                turn_id=turn_id,
+                turn_revision=revision,
+                deadline_monotonic_ns=int(grace.deadline * 1_000_000_000),
+            )
             self._prune_tracked_turns()
             return 0.0
         return remaining
