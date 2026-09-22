@@ -5,9 +5,10 @@ import base64
 import json
 import logging
 import os
+import threading
 from collections import deque
 from queue import Empty as QueueEmpty, Queue
-from threading import Event, Thread
+from threading import Event, RLock, Thread
 from time import perf_counter
 from typing import Any, Callable, Iterator, Protocol
 from urllib.parse import urlencode
@@ -306,50 +307,134 @@ class ElevenLabsScribeSTTHandler(BaseSTTHandler):
         self.stream_factory = stream_factory or RealtimeScribeStream
         self.stream: ScribeStream | None = None
         self.active_revision_key: tuple[str | None, int | None] | None = None
+        self._connection_lock = RLock()
+        self._connection_generation = 0
+        self._connection_key: tuple[str | None, int | None] | None = None
+        self._connection_ready = Event()
+        self._connection_error: Exception | None = None
+        self._connection_threads: set[Thread] = set()
         self.sent_sample_count = 0
+        self._pending_progressive_audio: np.ndarray | None = None
         self.active_turn: tuple[str, int, float] | None = None
         self.pending_commits: deque[tuple[str, int, float]] = deque()
         self._current_conversation_id: str | None = None
 
-    def _ensure_stream(self) -> ScribeStream:
-        if self.stream is None:
-            if not self.api_key:
-                raise ScribeAuthenticationError(
-                    "ElevenLabs Scribe API key is unavailable"
+    def _start_stream_connect(
+        self, revision_key: tuple[str | None, int | None]
+    ) -> None:
+        if not self.api_key:
+            raise ScribeAuthenticationError(
+                "ElevenLabs Scribe API key is unavailable"
+            )
+        turn_id, turn_revision = revision_key
+        recorder.emit(
+            "SCRIBE_CONNECTION_START",
+            turn_id=turn_id,
+            turn_revision=turn_revision,
+            conversation_id=self._current_conversation_id,
+        )
+        stream = self.stream_factory(
+            api_key=self.api_key,
+            ws_url=self.ws_url,
+            model_id=self.model_id,
+            language_code=self.language_code,
+            audio_format=self.audio_format,
+            commit_strategy=self.commit_strategy,
+            keyterms=self.keyterms,
+            connect_timeout_s=self.connect_timeout_s,
+        )
+        with self._connection_lock:
+            generation = self._connection_generation
+            self._connection_key = revision_key
+            self._connection_error = None
+            self._connection_ready = Event()
+            thread = Thread(
+                target=self._connect_stream,
+                args=(stream, revision_key, generation),
+                daemon=True,
+            )
+            self._connection_threads.add(thread)
+        thread.start()
+
+    def _connect_stream(
+        self,
+        stream: ScribeStream,
+        revision_key: tuple[str | None, int | None],
+        generation: int,
+    ) -> None:
+        try:
+            try:
+                stream.connect()
+            except Exception as exc:
+                with self._connection_lock:
+                    if generation == self._connection_generation:
+                        self._connection_error = exc
+                        self._connection_ready.set()
+                return
+
+            with self._connection_lock:
+                if generation != self._connection_generation:
+                    stream.close()
+                    return
+                if self.active_revision_key != revision_key:
+                    stream.close()
+                    self._connection_key = None
+                    self._connection_ready.set()
+                    return
+                self.stream = stream
+                self._connection_key = None
+                recorder.emit(
+                    "SCRIBE_CONNECTION_READY",
+                    turn_id=revision_key[0],
+                    turn_revision=revision_key[1],
+                    conversation_id=self._current_conversation_id,
                 )
-            turn_id, turn_revision = self.active_revision_key or (None, None)
-            recorder.emit(
-                "SCRIBE_CONNECTION_START",
-                turn_id=turn_id,
-                turn_revision=turn_revision,
-                conversation_id=self._current_conversation_id,
-            )
-            self.stream = self.stream_factory(
-                api_key=self.api_key,
-                ws_url=self.ws_url,
-                model_id=self.model_id,
-                language_code=self.language_code,
-                audio_format=self.audio_format,
-                commit_strategy=self.commit_strategy,
-                keyterms=self.keyterms,
-                connect_timeout_s=self.connect_timeout_s,
-            )
-            self.stream.connect()
-            recorder.emit(
-                "SCRIBE_CONNECTION_READY",
-                turn_id=turn_id,
-                turn_revision=turn_revision,
-                conversation_id=self._current_conversation_id,
-            )
-        else:
-            turn_id, turn_revision = self.active_revision_key or (None, None)
+                self._connection_ready.set()
+        finally:
+            with self._connection_lock:
+                self._connection_threads.discard(threading.current_thread())
+
+    def _ensure_stream(self, *, wait_for_connection: bool) -> ScribeStream | None:
+        revision_key = self.active_revision_key
+        with self._connection_lock:
+            if self.stream is not None:
+                stream = self.stream
+            elif self._connection_key == revision_key:
+                stream = None
+            else:
+                self._start_stream_connect(revision_key)
+                stream = None
+
+        if stream is not None:
             recorder.emit(
                 "SCRIBE_CONNECTION_REUSED",
-                turn_id=turn_id,
-                turn_revision=turn_revision,
+                turn_id=revision_key[0],
+                turn_revision=revision_key[1],
                 conversation_id=self._current_conversation_id,
             )
-        return self.stream
+            return stream
+
+        if not wait_for_connection:
+            return None
+
+        if not self._connection_ready.wait(self.connect_timeout_s):
+            raise ScribeTimeoutError(
+                "Timed out connecting to ElevenLabs Scribe"
+            )
+        with self._connection_lock:
+            if self._connection_error is not None:
+                raise self._connection_error
+            if self.stream is None:
+                raise ScribeConnectionError(
+                    "Scribe connection was invalidated before it became ready"
+                )
+            recorder.emit(
+                "SCRIBE_CONNECTION_REUSED",
+                turn_id=revision_key[0],
+                turn_revision=revision_key[1],
+                conversation_id=self._current_conversation_id,
+            )
+            return self.stream
 
     def _context(self, vad_audio: VADAudio) -> tuple[str, int, float] | None:
         if vad_audio.turn_id is None or vad_audio.turn_revision is None:
@@ -371,11 +456,18 @@ class ElevenLabsScribeSTTHandler(BaseSTTHandler):
         revision_key = (turn_id, turn_revision)
         if self.active_revision_key == revision_key:
             return
-        if self.stream is not None:
-            self.stream.close()
+        with self._connection_lock:
+            stream = self.stream
             self.stream = None
+            self._connection_generation += 1
+            self._connection_key = None
+            self._connection_error = None
+            self._connection_ready = Event()
+        if stream is not None:
+            stream.close()
         self.active_revision_key = revision_key
         self.sent_sample_count = 0
+        self._pending_progressive_audio = None
         self.pending_commits.clear()
 
     def process(self, vad_audio: STTIn) -> Iterator[STTOut]:
@@ -384,12 +476,34 @@ class ElevenLabsScribeSTTHandler(BaseSTTHandler):
         if context is not None:
             self.active_turn = context
         self._reset_for_revision(vad_audio.turn_id, vad_audio.turn_revision)
-        stream = self._ensure_stream()
         is_final = vad_audio.mode == "final"
+        stream = self._ensure_stream(wait_for_connection=is_final)
+        if stream is None:
+            self._pending_progressive_audio = (
+                np.asarray(vad_audio.audio, dtype=np.float32).copy()
+            )
+            return
+        if self._pending_progressive_audio is not None:
+            buffered_audio = self._pending_progressive_audio
+            self._pending_progressive_audio = None
+            yield from self._send_audio(stream, buffered_audio, vad_audio, is_final=False)
         if is_final and context is not None:
             self.pending_commits.append(context)
-        audio_delta = vad_audio.audio[self.sent_sample_count :]
-        self.sent_sample_count = len(vad_audio.audio)
+        yield from self._send_audio(stream, vad_audio.audio, vad_audio, is_final=is_final)
+
+    def _send_audio(
+        self,
+        stream: ScribeStream,
+        audio: np.ndarray,
+        vad_audio: STTIn,
+        *,
+        is_final: bool,
+    ) -> Iterator[STTOut]:
+        context = self._context(vad_audio)
+        audio_delta = np.asarray(audio)[self.sent_sample_count :]
+        self.sent_sample_count = len(audio)
+        if audio_delta.size == 0 and not is_final:
+            return
         try:
             if is_final:
                 recorder.emit(
@@ -511,10 +625,22 @@ class ElevenLabsScribeSTTHandler(BaseSTTHandler):
 
     def cleanup(self) -> None:
         logger.info("Stopping ElevenLabsScribeSTTHandler")
-        if self.stream is not None:
-            self.stream.close()
+        with self._connection_lock:
+            stream = self.stream
             self.stream = None
+            self._connection_generation += 1
+            self._connection_key = None
+            self._connection_error = None
+            self._connection_ready = Event()
+            threads = tuple(self._connection_threads)
+            self._connection_threads.clear()
+        if stream is not None:
+            stream.close()
+        for thread in threads:
+            if thread is not threading.current_thread():
+                thread.join(self.connect_timeout_s)
         self.active_turn = None
         self.active_revision_key = None
         self.sent_sample_count = 0
+        self._pending_progressive_audio = None
         self.pending_commits.clear()
