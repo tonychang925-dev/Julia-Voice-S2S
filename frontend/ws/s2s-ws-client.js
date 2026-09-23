@@ -120,6 +120,7 @@ function _codedError(message, code, extra) {
 // as soon as a sub-field shape it doesn't know about appears.
 const OUTPUT_SAMPLE_RATE = 16000;
 const MIC_CHUNK_MS = 40;
+const PLAYBACK_DIAGNOSTIC_ENDPOINT = "http://127.0.0.1:7861/playback-diagnostics";
 
 export class S2sWsRealtimeClient extends EventTarget {
   /** @param {WsClientOptions} options */
@@ -234,6 +235,20 @@ export class S2sWsRealtimeClient extends EventTarget {
     // socket. Backend VAD timestamps turn it into replayable user utterances.
     this._userAudioRecorder = new SentAudioRecorder();
     this._debug = (() => { try { return localStorage.getItem("s2s.debug") === "1"; } catch { return false; } })();
+    const search = typeof window === "undefined" ? "" : window.location.search;
+    const diagnosticParams = new URLSearchParams(search);
+    this._playbackDiagnosticsEnabled = diagnosticParams.get("playbackDiagnostics") === "1";
+    this._playbackDiagnostics = {
+      active: false,
+      responseId: "",
+      sequence: 0,
+      firstChunkAt: 0,
+      lastChunkAt: 0,
+      chunkCount: 0,
+      byteCount: 0,
+    };
+    this._pendingPlaybackResponse = null;
+    this._sendPlaybackDiagnostic("client-loaded");
   }
 
   get status() {
@@ -261,6 +276,57 @@ export class S2sWsRealtimeClient extends EventTarget {
     if (this._status === "ai-speaking") return;
     if (this._status === "closed" || this._status === "error") return;
     this._setStatus("ai-speaking");
+  }
+
+  _sendPlaybackDiagnostic(kind, data = {}) {
+    if (!this._playbackDiagnosticsEnabled) return;
+    const diagnostics = this._playbackDiagnostics;
+    diagnostics.sequence += 1;
+    const payload = {
+      diagnosticTaskId: "JULIA-VOICE-R3-ELECTRON-PLAYBACK-COMPLETENESS-P1",
+      kind,
+      sequence: diagnostics.sequence,
+      conversationId: this._conversationId,
+      responseId: diagnostics.responseId,
+      clientTimeMs: performance.now(),
+      wallTimeIso: new Date().toISOString(),
+      ...data,
+    };
+    fetch(PLAYBACK_DIAGNOSTIC_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      keepalive: true,
+    }).catch(() => {});
+  }
+
+  _beginPlaybackResponse(responseId) {
+    const diagnostics = this._playbackDiagnostics;
+    if (diagnostics.active && diagnostics.responseId === responseId) return;
+    this._finishPendingPlaybackResponse();
+    diagnostics.active = true;
+    diagnostics.responseId = responseId;
+    diagnostics.firstChunkAt = 0;
+    diagnostics.lastChunkAt = 0;
+    diagnostics.chunkCount = 0;
+    diagnostics.byteCount = 0;
+    this._sendPlaybackDiagnostic("queue-reset", { reason: "response-replaced" });
+    this._playbackNode?.port.postMessage({ kind: "clear", reason: "response-replaced" });
+    this._playbackNode?.port.postMessage({ kind: "response-begin" });
+    this._sendPlaybackDiagnostic("response-first-chunk");
+  }
+
+  _finishPendingPlaybackResponse() {
+    const pending = this._pendingPlaybackResponse;
+    if (!pending) return;
+    this._pendingPlaybackResponse = null;
+    this._asstTranscriptByResp.delete(pending.detail.responseId);
+    this._asstFullByResp.delete(pending.detail.responseId);
+    this._aiSpeaking = false;
+    if (this._status === "ai-speaking" || this._status === "processing") {
+      this._setStatus("connected");
+    }
+    this.dispatchEvent(new CustomEvent("response-finished", { detail: pending.detail }));
   }
 
   /**
@@ -663,11 +729,17 @@ export class S2sWsRealtimeClient extends EventTarget {
    * @param {{ kind: string; queuedMs?: number; played?: number }} data
    */
   _onPlaybackMessage(data) {
-    if (data?.kind === "underrun") {
-      // Server stopped sending audio mid-response. Most likely the turn
-      // ended cleanly (a response.done usually arrives just before/after
-      // this). We let the state machine fall back to "connected" via the
-      // response.done event handler.
+    if (!this._playbackDiagnostics.active) return;
+    if (data?.kind === "playback-complete" || data?.kind === "playback-stopped") {
+      this._sendPlaybackDiagnostic(data.kind, data);
+      this._playbackDiagnostics.active = false;
+      this._finishPendingPlaybackResponse();
+      return;
+    }
+    if (this._playbackDiagnosticsEnabled) {
+      if (data?.kind === "underrun" || data?.kind === "playback-started" || data?.kind === "queue-reset" || data?.kind === "stats") {
+        this._sendPlaybackDiagnostic(data.kind, data);
+      }
     }
   }
 
@@ -771,7 +843,8 @@ export class S2sWsRealtimeClient extends EventTarget {
         // reply or a tool result the worklet's ring buffer can still be draining
         // even though we already flipped `_aiSpeaking` off, and that tail would
         // otherwise keep playing over the user's barge-in.
-        this._playbackNode?.port.postMessage({ kind: "clear" });
+        this._playbackNode?.port.postMessage({ kind: "clear", reason: "user-speech-started" });
+        this._sendPlaybackDiagnostic("queue-reset", { reason: "user-speech-started" });
         this._aiSpeaking = false;
         this._userAudioRecorder.speechStarted({
           itemId: typeof event.item_id === "string" ? event.item_id : "",
@@ -820,8 +893,9 @@ export class S2sWsRealtimeClient extends EventTarget {
 
       case "response.audio.delta":
       case "response.output_audio.delta": {
-        this._pushAudioDelta(event.delta);
         const rid = event.response_id ?? event.response?.id;
+        this._beginPlaybackResponse(String(rid || ""));
+        this._pushAudioDelta(event.delta);
         if (rid) this._audibleResponses.add(rid);
         if (!this._aiSpeaking) {
           this._aiSpeaking = true;
@@ -839,13 +913,9 @@ export class S2sWsRealtimeClient extends EventTarget {
       }
 
       case "response.done": {
-        this._aiSpeaking = false;
         // This response freed the slot (completion OR cancellation both arrive
         // as response.done). Decrement and, if a create was waiting, replay it.
         this._openResponses = Math.max(0, this._openResponses - 1);
-        if (this._status === "ai-speaking" || this._status === "processing") {
-          this._setStatus("connected");
-        }
         // A response closes here for BOTH normal completion and cancellation
         // (the s2s server signals a speculative-turn interrupt as
         // `response.done` with status "cancelled" — there is no separate
@@ -865,12 +935,47 @@ export class S2sWsRealtimeClient extends EventTarget {
           extractResponseTranscript(event.response) ||
           this._asstDisplay(responseId) ||
           "";
-        // Response finished — clear both transcript accumulators for it.
-        this._asstTranscriptByResp.delete(responseId);
-        this._asstFullByResp.delete(responseId);
-        this.dispatchEvent(new CustomEvent("response-finished", {
-          detail: { responseId, status, audible, transcript },
-        }));
+        const waitForPlaybackDrain = this._playbackDiagnostics.active
+          && this._playbackDiagnostics.responseId === responseId
+          && status !== "cancelled";
+        if (this._playbackDiagnostics.active && this._playbackDiagnostics.responseId === responseId) {
+          const diagnostics = this._playbackDiagnostics;
+          const deliveryDurationMs = diagnostics.lastChunkAt && diagnostics.firstChunkAt
+            ? diagnostics.lastChunkAt - diagnostics.firstChunkAt
+            : 0;
+          const generatedAudioDurationMs = (diagnostics.byteCount / (OUTPUT_SAMPLE_RATE * 2)) * 1000;
+          this._playbackNode?.port.postMessage({ kind: "response-end" });
+          this._sendPlaybackDiagnostic("provider-response-complete", {
+            status,
+            chunkCount: diagnostics.chunkCount,
+            byteCount: diagnostics.byteCount,
+            generatedAudioDurationMs,
+            deliveryDurationMs,
+            providerStreamRatio: deliveryDurationMs > 0
+              ? generatedAudioDurationMs / deliveryDurationMs
+              : null,
+          });
+          if (status === "cancelled") {
+            this._playbackNode?.port.postMessage({
+              kind: "clear",
+              reason: "response-cancelled",
+            });
+            this._sendPlaybackDiagnostic("queue-reset", { reason: "response-cancelled" });
+            this._playbackDiagnostics.active = false;
+          }
+        }
+        const detail = { responseId, status, audible, transcript };
+        if (waitForPlaybackDrain) {
+          this._pendingPlaybackResponse = { detail };
+        } else {
+          this._asstTranscriptByResp.delete(responseId);
+          this._asstFullByResp.delete(responseId);
+          this._aiSpeaking = false;
+          if (this._status === "ai-speaking" || this._status === "processing") {
+            this._setStatus("connected");
+          }
+          this.dispatchEvent(new CustomEvent("response-finished", { detail }));
+        }
         // The slot is free now — replay a queued create (e.g. a tool follow-up
         // that arrived while this response was still running).
         this._flushQueuedCreate();
@@ -1011,6 +1116,16 @@ export class S2sWsRealtimeClient extends EventTarget {
     if (!this._playbackNode) return;
     if (!b64) return;
     const bytes = base64ToBytes(b64);
+    const diagnostics = this._playbackDiagnostics;
+    const arrivalAt = performance.now();
+    if (!diagnostics.firstChunkAt) diagnostics.firstChunkAt = arrivalAt;
+    diagnostics.lastChunkAt = arrivalAt;
+    diagnostics.chunkCount += 1;
+    diagnostics.byteCount += bytes.byteLength;
+    this._sendPlaybackDiagnostic("audio-chunk", {
+      byteCount: bytes.byteLength,
+      cumulativeByteCount: diagnostics.byteCount,
+    });
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const samples = new Float32Array(bytes.byteLength / 2);
     for (let i = 0; i < samples.length; i++) {
@@ -1023,6 +1138,16 @@ export class S2sWsRealtimeClient extends EventTarget {
   /** @param {CloseEvent} ev */
   _onWsClose(ev) {
     console.log("[ws] socket closed:", ev.code, ev.reason);
+    const hadPendingPlaybackResponse = Boolean(this._pendingPlaybackResponse);
+    if (hadPendingPlaybackResponse) {
+      this._playbackNode?.port.postMessage({ kind: "clear", reason: "socket-closed" });
+      this._playbackDiagnostics.active = false;
+    }
+    this._sendPlaybackDiagnostic("queue-reset", {
+      reason: "socket-closed",
+      code: ev.code,
+    });
+    if (hadPendingPlaybackResponse) this._finishPendingPlaybackResponse();
     if (this._status === "closed" || this._status === "error") return;
     if (ev.code === 1000) {
       this._setStatus("closed");
