@@ -1638,3 +1638,9 @@ full-runtime PyTorch removal
 provider authority redesign
 TTS replacement or streaming redesign
 ```
+
+## Canonical Continuation
+
+This R3 historical handoff remains valid as historical evidence. The current
+cross-project canonical continuation is
+`docs/rd1/RD1_V1_R3_CANONICAL_BASELINE_HANDOFF_2026-09-23.md`.
