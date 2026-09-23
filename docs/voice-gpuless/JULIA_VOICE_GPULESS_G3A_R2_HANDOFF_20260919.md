@@ -2,6 +2,332 @@
 
 Date: 2026-09-19
 
+## 2026-09-23 R3 Known-Good Consolidation Checkpoint
+
+This section is the current canonical new-agent entry point. It supersedes the
+older source tuples and next-step boundaries below. Do not restart optimization
+or create a replacement branch from this checkpoint; first preserve the runtime
+and source identity recorded here.
+
+### Frozen Source Identity
+
+```text
+REPO_FULL_NAME
+= tonychang925-dev/Julia-Voice-S2S
+
+WORKTREE_PATH
+= /Users/admin/glm-workspace/Julia-Voice-S2S
+
+BRANCH
+= voice-el-p1-hosted-product-integration
+
+VOICE_ACTIVE_HEAD
+= db4d5fa21674215d5015da9493f15097b7599b0d
+
+REMOTE_HEAD_SHA
+= db4d5fa21674215d5015da9493f15097b7599b0d
+
+REMOTE_HEAD_VERIFIED
+= YES
+
+NEW_BRANCH_CREATED
+= NO
+```
+
+The branch relationship from the accepted Scribe prewarm base to the playback
+candidate is intentionally two commits, not one:
+
+```text
+29d83e0e85a300d68c295d95c3b1b649dd1d269b
+  ↓
+9e3d9b3961f3d9c45d7a0c229d11fe389b997b02
+  ↓
+db4d5fa21674215d5015da9493f15097b7599b0d
+```
+
+Ancestry classification:
+
+```text
+ACTIVE_LINE_ADVANCE_FROM_29D83E0
+= 2 COMMITS
+
+INTERVENING_DOC_COMMIT
+= PRESENT
+
+INTERVENING_DOC_SHA
+= 9e3d9b3961f3d9c45d7a0c229d11fe389b997b02
+
+INTERVENING_DOC_MESSAGE
+= Update GPU-less Voice handoff baseline
+
+INTERVENING_DOC_PARENT
+= 29d83e0e85a300d68c295d95c3b1b649dd1d269b
+
+INTERVENING_DOC_SCOPE
+= docs/voice-gpuless/JULIA_VOICE_GPULESS_G3A_R2_HANDOFF_20260919.md only
+
+INTERVENING_DOC_PROVENANCE
+= owner-requested documentation/handoff continuation
+
+PLAYBACK_FIX_COMMIT
+= db4d5fa21674215d5015da9493f15097b7599b0d
+
+PLAYBACK_FIX_SCOPE
+= frontend playback/client files plus focused test only
+
+ACTIVE_LINE_ANCESTRY_CLEANLINESS
+= RESOLVED
+```
+
+There is no missing merge parent, rebase, reset, or replacement ref. The
+apparent ancestry anomaly is solely the legitimate docs-only handoff commit
+between the accepted input-path base and playback fix. Do not rewrite this
+history.
+
+### Accepted Active-Line History
+
+```text
+a603692  fix latency observability perf_counter reference
+954f389  Reuse ElevenLabs TTS session connections
+21d63f0  Complete input path latency observability
+29d83e0  Prewarm ElevenLabs Scribe connections
+9e3d9b3  Update GPU-less Voice handoff baseline
+db4d5fa  Gate response completion on playback drain
+```
+
+Current accepted outcomes:
+
+```text
+TTS_SESSION_CONNECTION_REUSE
+= ACCEPTED at 954f389
+
+INPUT_PATH_OBSERVABILITY
+= ACCEPTED at 21d63f0
+
+SCRIBE_CONNECTION_PREWARM
+= ACCEPTED at 29d83e0
+
+PLAYBACK_COMPLETION_GATING
+= ACCEPTED at db4d5fa
+```
+
+### Playback Completion Freeze
+
+Root cause and fix:
+
+```text
+ROOT_CAUSE_CLASS
+= RESPONSE_DONE_BEFORE_QUEUE_DRAIN
+
+ROOT_CAUSE
+= response.done arrived while audio remained queued; the old client emitted response-finished immediately, exited ai-speaking, and a later user-speech reset could clear the remaining valid audio.
+
+FIX
+= response-finished now waits for worklet playback-complete, cancellation, or socket closure.
+
+ROOT_CAUSE_CONFIDENCE
+= HIGH
+```
+
+Acceptance evidence:
+
+```text
+VALID_REAL_USER_TURNS
+= 10
+
+INCOMPLETE_AUDIO_TURNS
+= 0
+
+PLAYBACK_COMPLETE_TURNS
+= 10
+
+INPUT_LATENCY_REGRESSION
+= NO
+
+LATEST_INPUT_LAST_SPEECH_TO_BRAIN_REQUEST
+≈ 480.363ms
+```
+
+Final drain-gate accounting:
+
+```text
+PROVIDER_AUDIO_BYTES
+= 596480
+
+VOICE_AUDIO_BYTES_SENT
+= 596992
+
+ELECTRON_AUDIO_BYTES_RECEIVED
+= 596992
+
+WORKLET_AUDIO_BYTES_QUEUED
+= 596992
+
+WORKLET_AUDIO_BYTES_PLAYED
+= 596992
+
+PROVIDER_TO_VOICE_DIFFERENCE
+= deterministic 512-byte output-block padding
+
+DROPPED_BYTES
+= 0
+
+PLAYBACK_COMPLETE_AFTER_RESPONSE_DONE
+≈ 14.475 seconds
+```
+
+Playback policy boundary:
+
+```text
+JITTER_BUFFER_POLICY_CHANGED
+= NO
+
+SOURCE_STARTUP_PREBUFFER
+= 0ms
+
+400MS_DIAGNOSTIC_PREBUFFER
+= evidence-only; not production policy
+
+PRODUCTION_ADAPTIVE_BUFFER_IMPLEMENTATION
+= NOT AUTHORIZED
+```
+
+Regression result:
+
+```text
+node --test frontend/tests/playback-completeness.test.js
+= 7 passed
+
+tests/test_elevenlabs_scribe_stt.py
+tests/test_latency_observability.py
+= 28 passed
+```
+
+The wider frontend suite previously had two unrelated, pre-existing
+conversation-binding source assertions failing. They are not playback
+regressions and must not be silently mixed into a future playback task.
+
+### Frozen Runtime Tuple
+
+Loopback listeners verified after consolidation:
+
+```text
+VOICE_PROCESS
+= PID 50304, 127.0.0.1:8765
+
+VOICE_RUNTIME_SOURCE_BASE
+= 29d83e0e85a300d68c295d95c3b1b649dd1d269b
+
+VOICE_RUNTIME_INTERPRETER
+= /opt/miniconda3/envs/julia_voice_gpuless/bin/python
+
+VOICE_RUNTIME_ARGUMENTS
+= realtime; ElevenLabs Scribe zh; chat-completions via local Brain; ElevenLabs TTS; local CPU Smart Turn
+
+BRAIN_PROCESS
+= PID 79987, 127.0.0.1:18089
+
+FRONTEND_PROCESS
+= PID 10741, 127.0.0.1:7860
+
+PLAYBACK_DIAGNOSTIC_COLLECTOR
+= PID 21837, 127.0.0.1:7861
+
+AUTODL
+= OUT_OF_SCOPE
+
+SSH_TUNNEL
+= OUT_OF_SCOPE
+
+RD1_V1
+= PROTECTED
+```
+
+The Voice process was started before the docs and frontend commits. That is
+not a semantic mismatch for this checkpoint because neither intervening commit
+changes Voice Python code. The Electron page was refreshed to load the playback
+candidate without replacing the profile. Do not restart these services merely
+because a new task begins.
+
+Required proxy discipline remains:
+
+```text
+NO_PROXY
+= includes 127.0.0.1,localhost
+
+no_proxy
+= includes 127.0.0.1,localhost
+
+EXTERNAL_PROXY_ENV
+= preserve when the selected VPN/proxy route is required
+```
+
+The owner observed transient external proxy instability during handoff. One
+remote verification attempt failed through unavailable local proxy port 7890;
+a retry verified the exact remote HEAD successfully. Local Brain/Voice traffic
+must continue bypassing that proxy.
+
+### Evidence Locations
+
+```text
+PLAYBACK_EVIDENCE
+= /private/tmp/julia_playback_diagnostic.jsonl
+
+PLAYBACK_FINAL_DRAIN_GATE_WINDOW
+≈ lines 5017–5199
+
+PLAYBACK_9_RESPONSE_WINDOW
+≈ lines 2279–4850
+
+VOICE_LOG
+= /private/tmp/julia-voice-scribe-prewarm.log
+
+LATENCY_SINK
+= /var/folders/n3/v97n1r5j2l79b7gwkq1c87t80000gn/T/julia-voice-latency-events.jsonl
+```
+
+These are runtime-local evidence paths, not permanent authority stores. Copy
+the bytes or preserve the Mac session before relying on them for later dispute
+resolution.
+
+### Uncommitted Leftovers
+
+The canonical source state is `db4d5fa`, but the working tree intentionally
+still contains unrelated material:
+
+```text
+s2s/TTS/elevenlabs_tts_handler.py
+tests/test_elevenlabs_tts_handler.py
+= uncommitted ElevenLabs multi-stream/context-id candidate work
+
+docs/voice-el-p1-node2/
+= pre-existing untracked evidence archive
+```
+
+Do not describe these as part of the accepted playback commit. Do not delete,
+stage, commit, or roll them back without a separate owner-authorized task. A
+future TTS task must first mechanically audit the dirty diff and decide whether
+to preserve, test, or discard it.
+
+### Current Stop Boundary
+
+```text
+R3_PLAYBACK_COMPLETENESS
+= ACCEPTED
+
+NEXT_WORK
+= consolidation/read-only verification only unless Owner authorizes a new task
+
+LATENCY_OPTIMIZATION
+= NOT AUTHORIZED
+
+PRODUCTION_JITTER_BUFFER
+= NOT AUTHORIZED
+
+VAD / SMART_TURN / SCRIBE / BRAIN / CORE CHANGES
+= NOT AUTHORIZED
+```
+
 ## 2026-09-21 R3 Latency Baseline Freeze
 
 This section supersedes the older source/checklist SHA statements below for
