@@ -103,12 +103,22 @@ class NeverCalled:
         raise AssertionError("provider stream must not be opened")
 
 
-def build(H, *, frames=(), cancel_scope=None, speculative_turns=None, on_read=None, factory=None, api_key="test-api-key"):
+def build(
+    H,
+    *,
+    frames=(),
+    cancel_scope=None,
+    speculative_turns=None,
+    on_read=None,
+    factory=None,
+    api_key="test-api-key",
+):
     if factory is None:
         stream = FakeStream(frames, on_read=on_read)
 
         def factory(_text, _stream=stream):
             return _stream
+
     else:
         stream = None
 
@@ -199,7 +209,9 @@ def test_t3_oversized_chunk_splits_into_exact_blocks_without_loss():
 def test_t4_arbitrary_boundaries_reassemble_losslessly(sizes):
     M = _imports()
     total = sum(sizes)
-    assert total % 2 == 0, "T4 asserts lossless reassembly of VALID pcm; odd totals are T6"
+    assert (
+        total % 2 == 0
+    ), "T4 asserts lossless reassembly of VALID pcm; odd totals are T6"
     original = pcm(total, seed=5)
 
     frames, offset = [], 0
@@ -332,7 +344,9 @@ def test_t9_cancel_mid_stream_stops_emitting_and_closes_provider():
         if index == 1:
             scope.cancel()
 
-    handler, stream = build(M.handler, frames=[b64(a), b64(b), b64(c)], cancel_scope=scope, on_read=on_read)
+    handler, stream = build(
+        M.handler, frames=[b64(a), b64(b), b64(c)], cancel_scope=scope, on_read=on_read
+    )
     out = list(handler.process(tts_input(M.messages, cancel_generation=None)))
 
     assert out == [a], "A may be emitted; B and C must not reach the output"
@@ -349,7 +363,9 @@ def test_t9b_handler_never_mutates_cancel_state():
     before = scope.generation
     list(handler.process(tts_input(M.messages)))
 
-    assert scope.generation == before, "the handler is a consumer of cancellation state, not its owner"
+    assert (
+        scope.generation == before
+    ), "the handler is a consumer of cancellation state, not its owner"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -365,7 +381,9 @@ def test_t10_stale_speculative_revision_is_dropped_without_a_provider_call():
     guard = NeverCalled()
     handler, _ = build(M.handler, factory=guard, speculative_turns=tracker)
 
-    out = list(handler.process(tts_input(M.messages, turn_id="turn-x", turn_revision=0)))
+    out = list(
+        handler.process(tts_input(M.messages, turn_id="turn-x", turn_revision=0))
+    )
 
     assert out == []
     assert guard.called is False
@@ -376,8 +394,12 @@ def test_t10b_current_revision_is_committed_and_synthesised():
     tracker = M.turns.SpeculativeTurnTracker()
     tracker.observe("turn-y", 0)
 
-    handler, _ = build(M.handler, frames=[b64(pcm(BLOCK, seed=13))], speculative_turns=tracker)
-    out = list(handler.process(tts_input(M.messages, turn_id="turn-y", turn_revision=0)))
+    handler, _ = build(
+        M.handler, frames=[b64(pcm(BLOCK, seed=13))], speculative_turns=tracker
+    )
+    out = list(
+        handler.process(tts_input(M.messages, turn_id="turn-y", turn_revision=0))
+    )
 
     assert len(out) == 1
     assert tracker.is_committed("turn-y", 0)
@@ -429,7 +451,9 @@ def test_t11b_base64_decode_failure_does_not_kill_the_handler():
 def test_t12_api_key_never_reaches_logs_or_error_text(caplog):
     M = _imports()
     secret = "sk-super-secret-value-1234567890"
-    leaked_stream = FakeStream([M.handler.ProviderError(f"auth failed for key {secret}")])
+    leaked_stream = FakeStream(
+        [M.handler.ProviderError(f"auth failed for key {secret}")]
+    )
 
     handler, _ = build(M.handler, factory=lambda _t: leaked_stream, api_key=secret)
 
@@ -438,7 +462,9 @@ def test_t12_api_key_never_reaches_logs_or_error_text(caplog):
 
     rendered = "\n".join(rec.getMessage() for rec in caplog.records)
     assert secret not in rendered, "the API key must never reach a log record"
-    assert "<redacted>" in rendered, "provider error text must be scrubbed, not merely omitted"
+    assert (
+        "<redacted>" in rendered
+    ), "provider error text must be scrubbed, not merely omitted"
 
     # The key is legitimately held in memory (it is required to authenticate);
     # what must never happen is that it is *logged* or placed in the URL.
@@ -456,7 +482,9 @@ def test_t12_api_key_never_reaches_logs_or_error_text(caplog):
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def test_r1_real_transport_connect_path_binds_websockets_and_sends_init_frames(monkeypatch):
+def test_r1_real_transport_connect_path_binds_websockets_and_sends_init_frames(
+    monkeypatch,
+):
     M = _imports()
     ws = pytest.importorskip("websockets")
 
@@ -476,18 +504,21 @@ def test_r1_real_transport_connect_path_binds_websockets_and_sends_init_frames(m
     # Patch ONLY the network call; the real _connect()/_open() body executes.
     monkeypatch.setattr(ws, "connect", fake_connect)
 
-    stream = M.handler.ElevenLabsDialogueStream(text="hello julia", api_key="k", voice_id="voice-1")
+    stream = M.handler.ElevenLabsDialogueStream(
+        text="hello julia", api_key="k", voice_id="voice-1"
+    )
     stream._connect()  # the defect locus — used to raise NameError before connecting
 
-    assert sent[0]["__url__"].endswith("?model_id=eleven_v3_conversational&output_format=pcm_16000")
+    assert sent[0]["__url__"].endswith(
+        "?model_id=eleven_v3_conversational&output_format=pcm_16000"
+    )
     assert sent[1] == {"voices": ["voice-1"], "xi_api_key": "k"}
-    stream.start("hello julia")
     assert sent[2] == {
-        "inputs": [{"text": "hello julia", "voice_id": "voice-1", "new_turn": True, "flush": True}]
+        "inputs": [{"text": "hello julia", "voice_id": "voice-1", "new_turn": False}]
     }
+    assert sent[3] == {"close_socket": True}
 
     stream.close()
-    assert sent[-2] == {"close_socket": True}
     assert sent[-1] == {"__closed__": True}
 
 
@@ -514,159 +545,38 @@ def test_r1_close_settles_pending_recv_task_and_closes_private_loop(monkeypatch)
     stream._connect()
 
     assert stream.read(0.02) is None, "no frame within the poll window"
-    task = stream._reader_task
+    task = stream._recv_task
     assert task is not None and not task.done(), "a receive must still be in flight"
 
     loop = stream._loop
-    keepalive_task = stream._keepalive_task
-    loop_thread = stream._loop_thread
     stream.close()
 
-    assert task.done(), "close() must settle the pending receive task, not merely cancel it"
+    assert (
+        task.done()
+    ), "close() must settle the pending receive task, not merely cancel it"
     assert task.cancelled(), "the settled task must be cancelled"
     assert loop.is_closed(), "close() must close the private event loop"
-    assert stream._reader_task is None, "no task may outlive close()"
-    assert keepalive_task.done(), "no keep-alive task may outlive close()"
-    assert not loop_thread.is_alive(), "no loop thread may outlive close()"
+    assert stream._recv_task is None, "no task may outlive close()"
 
 
-class SessionStream:
-    def __init__(self, turns):
-        self.turns = turns
-        self.current = None
-        self.created = 1
-        self.closed = 0
-        self.valid = True
-
-    def start(self, text):
-        assert self.valid
-        self.current = self.turns.pop(0)
-
-    def read(self, timeout):
-        from speech_to_speech.TTS.elevenlabs_tts_handler import StreamEnded
-
-        if self.current is None:
-            raise AssertionError("read must not cross an unstarted turn boundary")
-        if not self.current:
-            self.current = None
-            raise StreamEnded()
-        item = self.current.pop(0)
-        if isinstance(item, Exception):
-            self.valid = False
-            raise item
-        return item
-
-    def close(self):
-        self.closed += 1
-
-
-def persistent_build(M, turns, cancel_scope=None):
-    session = SessionStream(turns)
-
-    def factory(_text):
-        return session
-
-    handler = M.handler.ElevenLabsTTSHandler(
-        Event(),
-        Queue(),
-        Queue(),
-        setup_args=(Event(),),
-        setup_kwargs={
-            "cancel_scope": cancel_scope,
-            "stream_factory": factory,
-            "api_key": "test-api-key",
-            "voice_id": "voice",
-        },
-    )
-    return handler, session
-
-
-def test_persistent_first_and_subsequent_utterances_use_one_connection():
+def test_each_successful_utterance_uses_and_closes_its_own_stream():
     M = _imports()
-    turns = [[b64(pcm(BLOCK, seed=21))], [b64(pcm(BLOCK, seed=22))], [b64(pcm(BLOCK, seed=23))]]
-    handler, session = persistent_build(M, turns)
+    first = pcm(BLOCK, seed=30)
+    second = pcm(BLOCK, seed=31)
+    streams = [FakeStream([b64(first)]), FakeStream([b64(second)])]
+    created = list(streams)
+    requested_texts = []
 
-    assert list(handler.process(tts_input(M.messages, text="one"))) != []
-    assert list(handler.process(tts_input(M.messages, text="two"))) != []
-    assert list(handler.process(tts_input(M.messages, text="three"))) != []
+    def factory(text, _streams=streams):
+        requested_texts.append(text)
+        return _streams.pop(0)
 
-    assert session.created == 1
-    assert session.closed == 0
+    handler, _ = build(M.handler, factory=factory)
 
-
-def test_persistent_turn_audio_and_completion_do_not_cross_boundaries():
-    M = _imports()
-    first = pcm(BLOCK, seed=24)
-    second = pcm(BLOCK, seed=25)
-    handler, session = persistent_build(M, [[b64(first)], [b64(second)]])
-
-    assert list(handler.process(tts_input(M.messages, turn_id="a", text="one"))) == [first]
-    assert session.current is None
-    assert list(handler.process(tts_input(M.messages, turn_id="b", text="two"))) == [second]
-    assert session.current is None
-
-
-def test_session_end_and_cleanup_close_transport_once_without_pending_tasks():
-    M = _imports()
-    handler, session = persistent_build(M, [[b64(pcm(BLOCK, seed=26))]])
-    list(handler.process(tts_input(M.messages)))
-    handler.on_session_end()
-    handler.cleanup()
-
-    assert session.closed == 1
-
-
-def test_cancellation_closes_transport_and_next_turn_reconnects_once():
-    M = _imports()
-    scope = M.cancel_scope.CancelScope()
-    first = pcm(BLOCK, seed=27)
-    second = pcm(BLOCK, seed=28)
-    first_session = SessionStream([[b64(first), b64(first), b64(first)]])
-    sessions = [first_session]
-
-    def factory(_text):
-        assert sessions, "only one reconnect is expected"
-        return sessions.pop(0)
-
-    handler = M.handler.ElevenLabsTTSHandler(
-        Event(), Queue(), Queue(), setup_args=(Event(),),
-        setup_kwargs={"cancel_scope": scope, "stream_factory": factory, "api_key": "k", "voice_id": "v"},
-    )
-
-    original_read = first_session.read
-
-    def cancel_read(timeout):
-        if first_session.current and len(first_session.current) == 2:
-            scope.cancel()
-        return original_read(timeout)
-
-    first_session.read = cancel_read
-    first = list(handler.process(tts_input(M.messages, cancel_generation=None, text="first")))
-    assert first == first
-    assert first_session.closed == 1
-
-    sessions.append(SessionStream([[b64(second)]]))
-    assert list(handler.process(tts_input(M.messages, text="second"))) == [second]
-
-
-def test_provider_disconnect_invalidates_transport_and_next_turn_reconnects():
-    M = _imports()
-    error = M.handler.ProviderError("disconnect")
-    healthy = pcm(BLOCK, seed=29)
-    broken = SessionStream([[error]])
-    healthy_session = SessionStream([[b64(healthy)]])
-    sessions = [broken, healthy_session]
-
-    def factory(_text):
-        return sessions.pop(0)
-
-    handler = M.handler.ElevenLabsTTSHandler(
-        Event(), Queue(), Queue(), setup_args=(Event(),),
-        setup_kwargs={"stream_factory": factory, "api_key": "k", "voice_id": "v"},
-    )
-    assert list(handler.process(tts_input(M.messages, text="bad"))) == []
-    assert broken.closed == 1
-    assert list(handler.process(tts_input(M.messages, text="good"))) == [healthy]
+    assert list(handler.process(tts_input(M.messages, text="one"))) == [first]
+    assert list(handler.process(tts_input(M.messages, text="two"))) == [second]
+    assert requested_texts == ["one", "two"]
+    assert [stream.closed for stream in created] == [True, True]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -683,7 +593,9 @@ def test_opt_request_url_carries_model_and_pcm_format():
         model_id="eleven_v3_conversational",
         output_format="pcm_16000",
     )
-    assert stream._url.endswith("?model_id=eleven_v3_conversational&output_format=pcm_16000")
+    assert stream._url.endswith(
+        "?model_id=eleven_v3_conversational&output_format=pcm_16000"
+    )
     assert "k" not in stream._url, "the API key must never be placed in the URL"
 
 
