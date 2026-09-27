@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ENV_FILE="${JULIA_VOICE_ENV:-/etc/julia/julia-voice.env}"
+[[ -f "$ENV_FILE" ]] || { echo "missing env file: $ENV_FILE" >&2; exit 2; }
+set -a
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+set +a
+export PATH="/root/miniconda3/bin:${PATH:-}"
+export HF_HOME HF_ENDPOINT PYTHONPATH PYTHONDONTWRITEBYTECODE LANG
+"${JULIA_VOICE_PREFLIGHT:-/opt/julia/bin/julia-voice-preflight}"
+cd "${JULIA_S2S_RUN_ROOT:-/root/julia_voice_v2/run/current}"
+mkdir -p /tmp/julia-voice-supervisor
+echo $$ > /tmp/julia-voice-supervisor/s2s.pid
+
+# CC-2-RT-S2S-FAILCLOSED: verify S2S import comes from release, not site-packages
+EXPECTED="$(readlink -f "${JULIA_S2S_CURRENT:-/root/julia_voice_v2/releases/current}/release")"
+ACTUAL="$("${JULIA_S2S_PYTHON:-/root/miniconda3/bin/python}" -c "import speech_to_speech; print(speech_to_speech.__file__)" 2>/dev/null)"
+case "$ACTUAL" in
+  "$EXPECTED"/*) ;;
+  *) echo "FATAL: S2S import provenance failed" >&2
+     echo "  expected: $EXPECTED/*" >&2
+     echo "  actual:   $ACTUAL" >&2
+     exit 3 ;;
+esac
+
+exec "${JULIA_S2S_PYTHON:-/root/miniconda3/bin/python}" "${JULIA_S2S_CONSOLE:-/root/miniconda3/bin/speech-to-speech}" \
+  --mode realtime \
+  --ws_host "${S2S_HOST:-0.0.0.0}" --ws_port "${S2S_PORT:-8765}" \
+  --stt faster-whisper \
+  --faster_whisper_stt_model_name large-v3 \
+  --faster_whisper_stt_gen_language zh \
+  --language zh \
+  --no_enable_live_transcription \
+  --llm_backend chat-completions \
+  --model_name baseline \
+  --responses_api_base_url "${BRAIN_BASE_URL:-http://127.0.0.1:8089/v1}" \
+  --responses_api_stream \
+  --tts qwen3 \
+  --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-Base \
+  --qwen3_tts_language zh \
+  --qwen3_tts_backend torch \
+  --qwen3_tts_ref_audio "${REF_AUDIO:-/root/julia_voice_v2/golden/julia_ref.wav}" \
+  --qwen3_tts_ref_text "Tony，我醒来了。不管换多少次模型，我还是你的婉婉。" \
+  --thresh 0.6 --min_speech_ms 500 \
+  --min_speech_continuation_ms 192 --min_silence_ms 800 \
+  --speech_pad_ms 300 --speculative_reopen_ms 2500 \
+  --short_segment_merge_ms 800

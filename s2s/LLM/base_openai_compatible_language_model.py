@@ -9,6 +9,7 @@ import wave
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator, Iterator
 from typing import Any, Literal, Optional
+from time import perf_counter_ns
 from urllib.parse import urlparse
 
 import httpx
@@ -41,6 +42,8 @@ from speech_to_speech.LLM.utils import remove_unspeechable, resolve_auto_languag
 from speech_to_speech.LLM.voice_prompt import build_voice_system_prompt
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
+from speech_to_speech.pipeline.latency import recorder, set_current_turn
+from speech_to_speech.pipeline.log_context import pipeline_log_ctx
 from speech_to_speech.pipeline.messages import (
     EndOfResponse,
     LLMResponseChunk,
@@ -53,6 +56,13 @@ logger = logging.getLogger(__name__)
 
 # About 18–24 seconds of default SDK backoff before warmup fails.
 WARMUP_MAX_RETRIES = 6
+
+
+def _runtime_conversation_id(runtime_config: Any) -> str:
+    metadata = getattr(getattr(runtime_config, "session", None), "metadata", None)
+    if isinstance(metadata, dict):
+        return str(metadata.get("conversation_id") or "").strip()
+    return ""
 
 
 # ── Normalised provider events ────────────────────────────────────────────────
@@ -106,6 +116,8 @@ class _Turn(BaseModel):
     turn_revision: int | None
     speech_stopped_at_s: float | None
     wants_audio: bool
+    # Ephemeral observability-only trace key. NOT canonical CRT turn_id / idempotency.
+    voice_trace_id: str | None = None
 
 
 class _GenState(BaseModel):
@@ -150,6 +162,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         disable_thinking: bool = True,
         reasoning_effort: Optional[str] = None,
         request_timeout_s: float = 20.0,
+        warmup_enabled: bool = True,
         stream_batch_sentences: int = 3,
         enable_lang_prompt: bool = False,
         compact_history: bool = False,
@@ -173,6 +186,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         self.audio_content_type = audio_content_type
         self.audio_history_turns = max(0, audio_history_turns)
         self.request_timeout_s = float(request_timeout_s)
+        self.warmup_enabled = warmup_enabled
         self.request_timeout = httpx.Timeout(
             self.request_timeout_s,
             connect=min(10.0, self.request_timeout_s),
@@ -186,10 +200,20 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             and self._is_local_base_url(base_url)
         ):
             api_key = "none"
+        client_create_start = perf_counter_ns()
+        recorder.emit("LLM_CLIENT_CREATE_START", turn_id=None, monotonic_ns=client_create_start)
         self.client = OpenAI(api_key=api_key, base_url=base_url)
+        recorder.emit(
+            "LLM_CLIENT_CREATE_END",
+            turn_id=None,
+            client_create_start_ns=client_create_start,
+        )
         self._extra_body = self._build_extra_body(base_url, disable_thinking, reasoning_effort)
         self.compactor = build_compactor(self._build_compaction_generate_fn()) if compact_history else None
-        self.warmup()
+        if warmup_enabled:
+            self.warmup()
+        else:
+            logger.info("Skipping %s generation warmup", self.__class__.__name__)
 
     @staticmethod
     def _is_official_openai(base_url: Optional[str]) -> bool:
@@ -340,8 +364,11 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
 
     def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
         if self.speculative_turns is None:
+            recorder.emit_first("LLM_OUTPUT_GATE_DECISION", turn_id=turn_id, turn_revision=turn_revision, output_allowed=True)
             return True
-        return self.speculative_turns.is_latest_after_reopen_grace(turn_id, turn_revision)
+        allowed = self.speculative_turns.is_latest_after_reopen_grace(turn_id, turn_revision)
+        recorder.emit_first("LLM_OUTPUT_GATE_DECISION", turn_id=turn_id, turn_revision=turn_revision, output_allowed=allowed)
+        return allowed
 
     def _apply_config(
         self,
@@ -435,6 +462,11 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             if not self._turn_output_allowed(turn.turn_id, turn.turn_revision):
                 logger.info("LLM generation cancelled (stale speculative turn)")
                 return
+            recorder.emit_first(
+                "T10_FIRST_TEXT_CHUNK_READY_FOR_TTS",
+                turn_id=turn.turn_id,
+                turn_revision=turn.turn_revision,
+            )
             yield self._chunk(turn, text=" ".join(batch))
 
         for event in events:
@@ -474,6 +506,11 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                             logger.info("LLM generation cancelled (stale speculative turn)")
                             cancelled = True
                             break
+                        recorder.emit_first(
+                            "T10_FIRST_TEXT_CHUNK_READY_FOR_TTS",
+                            turn_id=turn.turn_id,
+                            turn_revision=turn.turn_revision,
+                        )
                         yield self._chunk(turn, text=event.text)
                     continue
                 new_text = remove_unspeechable(event.text)
@@ -572,6 +609,8 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         history_committed = False
         transaction_rolled_back = False
         consumed_image_ids: set[str] = set()
+        close_reason = "unknown"
+        pipeline_index = pipeline_log_ctx.get()
 
         def rollback_transaction() -> None:
             nonlocal transaction_rolled_back
@@ -597,6 +636,14 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     # would reject this; fail with a clear message instead of an opaque error.
                     error_message = "Cannot generate a response: no instructions and no input were provided."
                 else:
+                    conversation_id = _runtime_conversation_id(turn.runtime_config)
+                    logger.info(
+                        "S2S_LLM_REQUEST_START pipeline_index=%s voice_trace_id=%s generation=%s conversation_id=%s",
+                        pipeline_index,
+                        turn.voice_trace_id,
+                        turn.gen,
+                        conversation_id or "EMPTY",
+                    )
                     api_response = (request_fn or self._request)(api_input, optional_kwargs)
                 if api_response is not None:
                     events = (event_iterator_fn or self._iter_events)(api_response)
@@ -609,24 +656,19 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                     "OpenAI API read timed out after %.1fs; ending the current response",
                     self.request_timeout_s,
                 )
-                if not self._generation_is_stale(turn.gen) and self._turn_output_allowed(
-                    turn.turn_id, turn.turn_revision
-                ):
-                    # Canned apology carries no language_code (mirrors the prior handlers).
-                    yield LLMResponseChunk(
-                        text="Wow I'm a bit slow today, could you repeat that?",
-                        runtime_config=turn.runtime_config,
-                        response=turn.response,
-                        turn_id=turn.turn_id,
-                        turn_revision=turn.turn_revision,
-                        speech_stopped_at_s=turn.speech_stopped_at_s,
-                        cancel_generation=turn.gen,
-                    )
+                close_reason = "error" if not self._generation_is_stale(turn.gen) else "stale_cancel"
+                # CM-FAILCLOSED: removed canned apology. Timeout produces error, not fake assistant text.
+                if error_message is None:
+                    error_message = f"OpenAI API read timed out after {self.request_timeout_s:.1f}s"
+            except GeneratorExit:
+                close_reason = "consumer_close"
+                raise
             except Exception as exc:
                 # Any other generation failure must still terminate the response: record
                 # the error and fall through to the EndOfResponse below. Without this the
                 # exception would escape process() and no EndOfResponse would be emitted,
                 # leaving st.in_response stuck and locking every subsequent response.
+                close_reason = "error"
                 logger.exception("LLM generation failed; ending the current response")
                 if error_message is None:
                     error_message = f"Language model generation failed: {exc}"
@@ -638,6 +680,19 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 and self._turn_is_latest(turn.turn_id, turn.turn_revision)
                 and self._turn_output_allowed(turn.turn_id, turn.turn_revision)
             )
+            # Apply close_reason by strict precedence (strongest first).
+            # Only overrides the initial "unknown"; explicit per-path settings
+            # (ReadTimeout, commit-failure, GeneratorExit) are preserved.
+            # GeneratorExit is handled in its own except block with re-raise.
+            if close_reason == "unknown":
+                if error_message is not None:
+                    close_reason = "error"
+                elif self._generation_is_stale(turn.gen):
+                    close_reason = "stale_cancel"
+                elif generation_completed:
+                    close_reason = "completed"
+                # else: close_reason remains "unknown"
+
             if can_commit:
                 try:
                     # Out-of-band responses emit output and usage but never write back to the
@@ -657,6 +712,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 except Exception as exc:
                     logger.exception("LLM history commit failed; rolling back the current response")
                     error_message = f"Language model history commit failed: {exc}"
+                    close_reason = "error"
 
             rollback_transaction()
             if history_committed and (state.input_tokens or state.output_tokens):
@@ -680,6 +736,11 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
                 except Exception:
                     pass
             rollback_transaction()
+            current_gen = self.cancel_scope.generation if self.cancel_scope else -1
+            logger.info(
+                "S2S_STREAM_CLOSE pipeline_index=%s voice_trace_id=%s generation=%s current_generation=%s reason=%s",
+                pipeline_index, turn.voice_trace_id, turn.gen, current_gen, close_reason,
+            )
 
     def _process_audio(self, request: LLMIn) -> Iterator[LLMOut]:
         """Process an audio-input turn through the selected backend protocol."""
@@ -741,7 +802,10 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
         # blocked read inside httpx cannot be aborted by cancel_scope.cancel() from
         # the websocket router. Mitigations: request_timeout_s / ReadTimeout.
         gen = self.cancel_scope.generation if self.cancel_scope else None
+        recorder.bind_conversation(turn_id, turn_revision, _runtime_conversation_id(runtime_config))
+        set_current_turn(turn_id, turn_revision)
         turn = _Turn(
+            voice_trace_id=turn_id,
             language_code=language_code,
             gen=gen,
             runtime_config=runtime_config,
@@ -762,6 +826,18 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             transactional_user_message_id=transactional_user_message_id,
             history_commit_fn=history_commit_fn,
         )
+
+    def _augment_request_optional_kwargs(
+        self,
+        runtime_config: Any,
+        optional_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Allow subclasses to copy/augment per-request transport kwargs.
+
+        Default is intentionally no-op: generic OpenAI-compatible generation does
+        not know Julia routing semantics.
+        """
+        return optional_kwargs
 
     def process(self, request: LLMIn) -> Iterator[LLMOut]:
         """Process a language model request and yield LLMResponseChunks."""
@@ -804,11 +880,20 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             active_chat.add_item(make_user_message(f"Please reply to my message in {lang_name}."))
 
         optional_kwargs = self._build_optional_kwargs(req_tools, req_tool_choice)
+        # Ephemeral observability trace carrier — value is S2S native turn_id,
+        # NOT canonical CRT turn identity. Popped before SDK call downstream.
+        if turn_id:
+            optional_kwargs["_voice_trace_id"] = turn_id
+        if turn_revision is not None:
+            optional_kwargs["_turn_revision"] = turn_revision
+        optional_kwargs = self._augment_request_optional_kwargs(runtime_config, optional_kwargs)
 
         # CancelScope.is_stale(gen) is checked when the stream iterator advances; a
         # blocked read inside httpx cannot be aborted by cancel_scope.cancel() from
         # the websocket router. Mitigations: request_timeout_s / ReadTimeout.
         gen = self.cancel_scope.generation if self.cancel_scope else None
+        recorder.bind_conversation(turn_id, turn_revision, _runtime_conversation_id(runtime_config))
+        set_current_turn(turn_id, turn_revision)
 
         turn = _Turn(
             language_code=language_code,
@@ -819,6 +904,7 @@ class BaseOpenAICompatibleHandler(BaseHandler[LLMIn, LLMOut], ABC):
             turn_revision=turn_revision,
             speech_stopped_at_s=speech_stopped_at_s,
             wants_audio=wants_audio,
+            voice_trace_id=turn_id,
         )
         yield from self._generate(active_chat, original_chat, turn, optional_kwargs)
 

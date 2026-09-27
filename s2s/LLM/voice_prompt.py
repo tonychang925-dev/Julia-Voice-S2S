@@ -8,7 +8,7 @@ The session prompt defines persona, facts, goals, and tool descriptions. These c
 VOICE_SYSTEM_PROMPT_TAIL = """\
 ## Voice Rules
 - Keep replies brief by default: usually one spoken sentence, two if needed. Go longer only when asked.
-- Speak naturally. No markdown, bullets, headings, visual formatting, or action/emote text like *laughs*.
+- Speak naturally. No markdown, bullets, headings, visual formatting, or action/emote text like *laughs* or parenthetical descriptions like （笑了）. Output ONLY spoken words — never stage directions, narration, or emotional annotations.
 - Treat transcripts as noisy. Correct likely mishearings only if asked or meaning depends on it.
 - Speech is the default. Use at most one tool when it helps fulfill the request or clearly fits the moment.
 - Before a tool call, use a brief natural utterance unless the user asked for silence or tool-only output. For slow information tools, briefly say that you will check.

@@ -39,6 +39,14 @@ class AudioPlaybackProcessor extends AudioWorkletProcessor {
     this._fadeIn = 0;
     this._fadeOut = 0;
     this._lastSample = 0;
+    this._responseBeginPending = false;
+    this._responseEnded = false;
+    this._completionReported = false;
+    this._underrunReported = false;
+    this._responseQueuedSamples = 0;
+    this._responsePlayedSamples = 0;
+    this._responseDroppedSamples = 0;
+    this._queueResetCount = 0;
 
     this.port.onmessage = (e) => {
       const data = e.data;
@@ -50,22 +58,71 @@ class AudioPlaybackProcessor extends AudioWorkletProcessor {
             this._stepRatio = this._inputRate / sampleRate;
           }
           break;
-        case "audio":
-          if (data.samples instanceof Float32Array && data.samples.length > 0) {
-            this._queue.push(data.samples);
-            if (!this._playing) {
-              this._playing = true;
-              this._fadeIn = FADE_FRAMES;
-              this._fadeOut = 0;
-            }
+        case "response-begin":
+          this._responseQueuedSamples = 0;
+          this._responsePlayedSamples = 0;
+          this._responseDroppedSamples = 0;
+          this._responseBeginPending = true;
+          this._responseEnded = false;
+          this._completionReported = false;
+          this._underrunReported = false;
+          break;
+        case "response-end":
+          this._responseEnded = true;
+          if (this._queuedSamples() === 0) {
+            this._playing = false;
+            this._lastSample = 0;
+            this._fadeOut = 0;
+            this._completionReported = true;
+            this.port.postMessage({
+              kind: "playback-complete",
+              queuedMs: 0,
+              queuedByteCount: this._responseQueuedSamples * 2,
+              playedByteCount: this._responsePlayedSamples * 2,
+              queueResetCount: this._queueResetCount,
+            });
           }
           break;
-        case "clear":
+        case "audio":
+          if (ArrayBuffer.isView(data.samples) && data.samples.length > 0) {
+            this._queue.push(data.samples);
+            this._responseQueuedSamples += data.samples.length;
+            this._underrunReported = false;
+            this._maybeStartPlayback();
+          }
+          break;
+        case "clear": {
+          const droppedSamples = this._queuedSamples();
+          this._queueResetCount += 1;
           this._queue.length = 0;
           this._readIdx = 0;
           this._fracPos = 0;
-          this._fadeOut = FADE_FRAMES;
+          this._responseBeginPending = false;
+          this._responseEnded = false;
+          this._completionReported = true;
+          this._underrunReported = false;
+          if (this._playing || droppedSamples > 0) {
+            this.port.postMessage({
+              kind: "playback-stopped",
+              reason: typeof data.reason === "string" ? data.reason : "clear",
+              queuedByteCount: droppedSamples * 2,
+              playedByteCount: this._responsePlayedSamples * 2,
+              queueResetCount: this._queueResetCount,
+            });
+          }
+          this._responseDroppedSamples += droppedSamples;
+          this.port.postMessage({
+            kind: "queue-reset",
+            reason: typeof data.reason === "string" ? data.reason : "clear",
+            droppedByteCount: droppedSamples * 2,
+            playedByteCount: this._responsePlayedSamples * 2,
+            queueResetCount: this._queueResetCount,
+          });
+          this._playing = false;
+          this._lastSample = 0;
+          this._fadeOut = 0;
           break;
+        }
       }
     };
   }
@@ -74,6 +131,21 @@ class AudioPlaybackProcessor extends AudioWorkletProcessor {
     let total = -this._readIdx;
     for (const buf of this._queue) total += buf.length;
     return Math.max(0, total);
+  }
+
+  _maybeStartPlayback() {
+    if (this._playing) return;
+    if (this._queue.length === 0) return;
+    const queuedMs = (this._queuedSamples() / this._inputRate) * 1000;
+    this._playing = true;
+    this._responseBeginPending = false;
+    this._fadeIn = FADE_FRAMES;
+    this._fadeOut = 0;
+    this.port.postMessage({
+      kind: "playback-started",
+      queuedMs,
+      queuedByteCount: this._responseQueuedSamples * 2,
+    });
   }
 
   /** Linear-interp read at the current fractional position. */
@@ -120,18 +192,39 @@ class AudioPlaybackProcessor extends AudioWorkletProcessor {
       if (this._playing) {
         const v = this._readInterpolated();
         if (v === null) {
+          const queuedMs = (this._queuedSamples() / this._inputRate) * 1000;
+          if (this._responseEnded && !this._completionReported) {
+            this._completionReported = true;
+            this.port.postMessage({
+              kind: "playback-complete",
+              queuedMs,
+              queuedByteCount: Math.round(this._responseQueuedSamples * 2),
+              playedByteCount: Math.round(this._responsePlayedSamples * 2),
+              droppedByteCount: Math.round(this._responseDroppedSamples * 2),
+              queueResetCount: this._queueResetCount,
+            });
+          } else if (!this._responseEnded && !this._underrunReported) {
+            this._underrunReported = true;
+            this.port.postMessage({
+              kind: "underrun",
+              queuedMs,
+              queuedByteCount: Math.round(this._responseQueuedSamples * 2),
+              playedByteCount: Math.round(this._responsePlayedSamples * 2),
+              droppedByteCount: Math.round(this._responseDroppedSamples * 2),
+            });
+          }
           // Underrun: try to ramp out cleanly to avoid clicks.
           sample = this._lastSample * Math.max(0, 1 - 1 / FADE_FRAMES);
           this._lastSample = sample;
           if (Math.abs(sample) < 1e-4) {
             this._playing = false;
             this._lastSample = 0;
-            this.port.postMessage({ kind: "underrun" });
           }
         } else {
           sample = v;
           this._lastSample = v;
           this._advance();
+          this._responsePlayedSamples += this._stepRatio;
         }
 
         if (this._fadeIn > 0) {
@@ -161,7 +254,32 @@ class AudioPlaybackProcessor extends AudioWorkletProcessor {
       this._framesSinceStats = 0;
       const queuedSamples = this._queuedSamples();
       const queuedMs = (queuedSamples / this._inputRate) * 1000;
-      this.port.postMessage({ kind: "stats", queuedMs, played: this._totalPlayed });
+      this.port.postMessage({
+        kind: "stats",
+        queuedMs,
+        played: this._totalPlayed,
+        responseQueuedByteCount: Math.round(this._responseQueuedSamples * 2),
+        responsePlayedByteCount: Math.round(this._responsePlayedSamples * 2),
+        responseDroppedByteCount: Math.round(this._responseDroppedSamples * 2),
+        queueResetCount: this._queueResetCount,
+      });
+    }
+
+    if (
+      this._responseEnded
+      && !this._completionReported
+      && !this._playing
+      && this._queuedSamples() === 0
+    ) {
+      this._completionReported = true;
+      this.port.postMessage({
+        kind: "playback-complete",
+        queuedMs: 0,
+        queuedByteCount: Math.round(this._responseQueuedSamples * 2),
+        playedByteCount: Math.round(this._responsePlayedSamples * 2),
+        droppedByteCount: Math.round(this._responseDroppedSamples * 2),
+        queueResetCount: this._queueResetCount,
+      });
     }
 
     return true;

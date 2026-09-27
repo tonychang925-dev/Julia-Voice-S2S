@@ -18,6 +18,13 @@ from speech_to_speech.api.openai_realtime.handlers.base import RealtimeBaseHandl
 logger = logging.getLogger(__name__)
 
 
+def _session_conversation_id(session: object) -> str:
+    metadata = getattr(session, "metadata", None)
+    if isinstance(metadata, dict):
+        return str(metadata.get("conversation_id") or "").strip()
+    return ""
+
+
 class SessionHandler(RealtimeBaseHandler):
     """Owns session lifecycle: config updates and lifecycle events."""
 
@@ -43,12 +50,23 @@ class SessionHandler(RealtimeBaseHandler):
         if model is not None:
             logger.info(f"Session model set to: {model}")
 
+        incoming_conversation_id = _session_conversation_id(s)
+        logger.info(
+            "CC1_SESSION_UPDATE conversation_id=%s",
+            incoming_conversation_id or "EMPTY",
+        )
+
         cfg = self._state(conn_id).runtime_config
         current = cfg.session
         if current is None:
             cfg.session = s
         else:
             cfg.apply_session_update(s)
+        bound_conversation_id = _session_conversation_id(cfg.session)
+        logger.info(
+            "CC1_RUNTIME_BIND conversation_id=%s",
+            bound_conversation_id or "EMPTY",
+        )
         logger.info("Session configuration updated")
         return None
 

@@ -53,6 +53,11 @@
  * @property {string} instructions
  * @property {string} [startupGreeting] Hidden user prompt that asks the model
  *   to greet once after the initial session configuration is sent.
+ * @property {string} [conversationId] Canonical Core conversation identity for
+ *   Julia-bound realtime sessions. This is identifier-only; never history.
+ * @property {boolean} [canonicalConversationRequired] Fail closed if the
+ *   realtime session would start without conversationId. Electron-hosted CC-1
+ *   sessions set this so Voice cannot fall back to a standalone history path.
  * @property {MediaStream} [micStream] Live mic stream. Provide this OR `acquireMic`.
  * @property {() => Promise<MediaStream>} [acquireMic] Lazily obtain the mic stream,
  *   called only once a session is actually granted (after any queue wait). Lets the
@@ -69,6 +74,9 @@
  *   before it's sent. Tunable live via `setNoiseGate`.
  * @property {string} [audioOutputId] MediaDeviceInfo.deviceId for speakers.
  *   Applied via AudioContext.setSinkId when the browser supports it.
+ * @property {boolean} [deferMicCapture] Connect and configure the realtime
+ *   session without acquiring a microphone. The Electron-hosted workspace uses
+ *   this to seed canonical context before resumeMicCapture().
  *
  * @typedef {Object} NoiseGate
  * @property {boolean} enabled
@@ -112,6 +120,7 @@ function _codedError(message, code, extra) {
 // as soon as a sub-field shape it doesn't know about appears.
 const OUTPUT_SAMPLE_RATE = 16000;
 const MIC_CHUNK_MS = 40;
+const PLAYBACK_DIAGNOSTIC_ENDPOINT = "http://127.0.0.1:7861/playback-diagnostics";
 
 export class S2sWsRealtimeClient extends EventTarget {
   /** @param {WsClientOptions} options */
@@ -205,10 +214,41 @@ export class S2sWsRealtimeClient extends EventTarget {
     this._sessionConfigured = false;
     this._startupGreeting = options.startupGreeting?.trim() ?? "";
     this._startupGreetingSent = false;
+    this._canonicalConversationRequired = options.canonicalConversationRequired === true;
+    this._conversationId = String(options.conversationId ?? "").trim();
+    if (this._canonicalConversationRequired && !this._conversationId) {
+      throw new Error("Canonical conversation_id is required for this Voice session");
+    }
+    this._configuredConversationId = "";
+    this._deferMicCapture = options.deferMicCapture === true;
+    /** @type {((conversationId: string) => void) | null} */
+    this._configuredResolve = null;
+    /** @type {((err: Error) => void) | null} */
+    this._configuredReject = null;
+    this._configuredPromise = new Promise((resolve, reject) => {
+      this._configuredResolve = resolve;
+      this._configuredReject = reject;
+    });
+    /** @type {Array<{ resolve: (value: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>} */
+    this._pendingItemCreates = [];
     // Bounded, browser-local copy of the exact PCM frames sent over this
     // socket. Backend VAD timestamps turn it into replayable user utterances.
     this._userAudioRecorder = new SentAudioRecorder();
     this._debug = (() => { try { return localStorage.getItem("s2s.debug") === "1"; } catch { return false; } })();
+    const search = typeof window === "undefined" ? "" : window.location.search;
+    const diagnosticParams = new URLSearchParams(search);
+    this._playbackDiagnosticsEnabled = diagnosticParams.get("playbackDiagnostics") === "1";
+    this._playbackDiagnostics = {
+      active: false,
+      responseId: "",
+      sequence: 0,
+      firstChunkAt: 0,
+      lastChunkAt: 0,
+      chunkCount: 0,
+      byteCount: 0,
+    };
+    this._pendingPlaybackResponse = null;
+    this._sendPlaybackDiagnostic("client-loaded");
   }
 
   get status() {
@@ -238,11 +278,74 @@ export class S2sWsRealtimeClient extends EventTarget {
     this._setStatus("ai-speaking");
   }
 
+  _sendPlaybackDiagnostic(kind, data = {}) {
+    if (!this._playbackDiagnosticsEnabled) return;
+    const diagnostics = this._playbackDiagnostics;
+    diagnostics.sequence += 1;
+    const payload = {
+      diagnosticTaskId: "JULIA-VOICE-R3-ELECTRON-PLAYBACK-COMPLETENESS-P1",
+      kind,
+      sequence: diagnostics.sequence,
+      conversationId: this._conversationId,
+      responseId: diagnostics.responseId,
+      clientTimeMs: performance.now(),
+      wallTimeIso: new Date().toISOString(),
+      ...data,
+    };
+    fetch(PLAYBACK_DIAGNOSTIC_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      keepalive: true,
+    }).catch(() => {});
+  }
+
+  _beginPlaybackResponse(responseId) {
+    const diagnostics = this._playbackDiagnostics;
+    if (diagnostics.active && diagnostics.responseId === responseId) return;
+    this._finishPendingPlaybackResponse();
+    diagnostics.active = true;
+    diagnostics.responseId = responseId;
+    diagnostics.firstChunkAt = 0;
+    diagnostics.lastChunkAt = 0;
+    diagnostics.chunkCount = 0;
+    diagnostics.byteCount = 0;
+    this._sendPlaybackDiagnostic("queue-reset", { reason: "response-replaced" });
+    this._playbackNode?.port.postMessage({ kind: "clear", reason: "response-replaced" });
+    this._playbackNode?.port.postMessage({ kind: "response-begin" });
+    this._sendPlaybackDiagnostic("response-first-chunk");
+  }
+
+  _finishPendingPlaybackResponse() {
+    const pending = this._pendingPlaybackResponse;
+    if (!pending) return;
+    this._pendingPlaybackResponse = null;
+    this._asstTranscriptByResp.delete(pending.detail.responseId);
+    this._asstFullByResp.delete(pending.detail.responseId);
+    this._aiSpeaking = false;
+    if (this._status === "ai-speaking" || this._status === "processing") {
+      this._setStatus("connected");
+    }
+    this.dispatchEvent(new CustomEvent("response-finished", { detail: pending.detail }));
+  }
+
   /**
    * Full handshake. Resolves once the WS is open AND the audio pipeline is
    * ready to send/receive samples.
    * @returns {Promise<void>}
    */
+  get conversationId() {
+    return this._conversationId;
+  }
+
+  get configuredConversationId() {
+    return this._configuredConversationId;
+  }
+
+  waitUntilConfigured() {
+    return this._configuredPromise;
+  }
+
   async connect() {
     if (this._ws) throw new Error("Already connected");
 
@@ -274,7 +377,7 @@ export class S2sWsRealtimeClient extends EventTarget {
     // Acquire the mic now — only once a slot is actually ours. The caller primed
     // permission up front, so this is silent and the 'in use' indicator lights
     // only for a real, connecting session (never during a queue wait).
-    if (!this.options.micStream && this._acquireMic) {
+    if (!this._deferMicCapture && !this.options.micStream && this._acquireMic) {
       this.options.micStream = await this._acquireMic();
     }
 
@@ -519,17 +622,13 @@ export class S2sWsRealtimeClient extends EventTarget {
     captureNode.port.postMessage({ kind: "gate", ...this._noiseGate });
     this._captureNode = captureNode;
 
-    const micSrc = ctx.createMediaStreamSource(this.options.micStream);
-    micSrc.connect(captureNode);
-    this._micSrc = micSrc;
-
-    // Mic analyser: tap the mic in parallel with the worklet so we get the
-    // raw (un-resampled, un-clipped) signal for the visualiser.
+    // Mic analyser exists even in deferred-capture mode; the real source is
+    // connected only after canonical history has been seeded.
     const micAnalyser = ctx.createAnalyser();
     micAnalyser.fftSize = VIS_FFT_SIZE;
     micAnalyser.smoothingTimeConstant = 0;
-    micSrc.connect(micAnalyser);
     this._micAnalyser = micAnalyser;
+    if (this.options.micStream) this._attachMicStream(this.options.micStream);
 
     const playbackNode = new AudioWorkletNode(ctx, "audio-playback", {
       numberOfInputs: 0,
@@ -579,24 +678,50 @@ export class S2sWsRealtimeClient extends EventTarget {
       ws.binaryType = "arraybuffer";
       this._ws = ws;
 
-      const onceOpen = () => {
-        ws.removeEventListener("open", onceOpen);
-        ws.removeEventListener("error", onceErr);
-        resolve();
-      };
-      const onceErr = (e) => {
-        ws.removeEventListener("open", onceOpen);
-        ws.removeEventListener("error", onceErr);
-        reject(new Error(`WebSocket failed to open: ${e?.type ?? "error"}`));
-      };
-      ws.addEventListener("open", onceOpen);
-      ws.addEventListener("error", onceErr);
+      // VOICE-WS-LIFECYCLE-001: transport open != session established. The S2S
+      // single-slot pipeline rejects an overlapping dial with close(1008)
+      // AFTER the TCP/Upgrade handshake completes, so resolving on `open`
+      // reports "success" for a session the server immediately kills. Instead
+      // treat the first server message (session.created) as the session-ready
+      // signal; a 1008 close before that fails the connect so callers can
+      // retry rather than believing a dead session succeeded.
+      const established = new Promise((res, rej) => {
+        const onMessage = (e) => {
+          cleanup();
+          res(e.data);
+        };
+        const onClose = (e) => {
+          cleanup();
+          const reason = (e.reason || "").trim();
+          rej(new Error(`WebSocket closed (${e.code}) ${reason}`.trim()));
+        };
+        const onErr = () => {
+          cleanup();
+          rej(new Error(`WebSocket failed during session establishment`));
+        };
+        const timer = setTimeout(() => {
+          cleanup();
+          rej(new Error("WebSocket session establishment timeout"));
+        }, 15000);
+        const cleanup = () => {
+          clearTimeout(timer);
+          ws.removeEventListener("message", onMessage);
+          ws.removeEventListener("close", onClose);
+          ws.removeEventListener("error", onErr);
+        };
+        ws.addEventListener("message", onMessage);
+        ws.addEventListener("close", onClose);
+        ws.addEventListener("error", onErr);
+      });
 
+      ws.addEventListener("open", () => {});
       ws.addEventListener("message", (e) => this._onWsMessage(e.data));
       ws.addEventListener("close", (e) => this._onWsClose(e));
       ws.addEventListener("error", (e) => {
         console.error("[ws] socket error", e);
       });
+
+      established.then(resolve, reject);
     });
   }
 
@@ -604,11 +729,17 @@ export class S2sWsRealtimeClient extends EventTarget {
    * @param {{ kind: string; queuedMs?: number; played?: number }} data
    */
   _onPlaybackMessage(data) {
-    if (data?.kind === "underrun") {
-      // Server stopped sending audio mid-response. Most likely the turn
-      // ended cleanly (a response.done usually arrives just before/after
-      // this). We let the state machine fall back to "connected" via the
-      // response.done event handler.
+    if (!this._playbackDiagnostics.active) return;
+    if (data?.kind === "playback-complete" || data?.kind === "playback-stopped") {
+      this._sendPlaybackDiagnostic(data.kind, data);
+      this._playbackDiagnostics.active = false;
+      this._finishPendingPlaybackResponse();
+      return;
+    }
+    if (this._playbackDiagnosticsEnabled) {
+      if (data?.kind === "underrun" || data?.kind === "playback-started" || data?.kind === "queue-reset" || data?.kind === "stats") {
+        this._sendPlaybackDiagnostic(data.kind, data);
+      }
     }
   }
 
@@ -668,14 +799,38 @@ export class S2sWsRealtimeClient extends EventTarget {
         // Server-side defaults for the s2s pipeline are already what we
         // want (server_vad, whisper-1 transcription, PCM16 16k in / 24k
         // out). We only push the user-tunable bits: voice + instructions.
-        this._sendSessionUpdate();
-        this._sessionConfigured = true;
+        try {
+          const configuredConversationId = this._sendSessionUpdate();
+          this._sessionConfigured = true;
+          this._configuredConversationId = configuredConversationId;
+          this._configuredResolve?.(configuredConversationId);
+          this._configuredResolve = null;
+          this._configuredReject = null;
+        } catch (err) {
+          const error = err instanceof Error ? err : new Error(String(err));
+          this._configuredReject?.(error);
+          this._configuredResolve = null;
+          this._configuredReject = null;
+          this.dispatchEvent(new CustomEvent("error", { detail: { error } }));
+          this._setStatus("error");
+          try { this._ws?.close(); } catch {}
+          break;
+        }
         // The s2s server does not echo session.updated. WebSocket messages are
         // ordered, so this hidden item and response.create are handled only
         // after the session.update sent immediately above.
         this._sendStartupGreeting();
         if (this._status === "connecting") this._setStatus("connected");
         break;
+
+      case "conversation.item.created": {
+        const pending = this._pendingItemCreates.shift();
+        if (pending) {
+          clearTimeout(pending.timer);
+          pending.resolve(event.item || event);
+        }
+        break;
+      }
 
       case "session.updated":
         // Some Realtime servers acknowledge session.update; the greeting was
@@ -688,7 +843,8 @@ export class S2sWsRealtimeClient extends EventTarget {
         // reply or a tool result the worklet's ring buffer can still be draining
         // even though we already flipped `_aiSpeaking` off, and that tail would
         // otherwise keep playing over the user's barge-in.
-        this._playbackNode?.port.postMessage({ kind: "clear" });
+        this._playbackNode?.port.postMessage({ kind: "clear", reason: "user-speech-started" });
+        this._sendPlaybackDiagnostic("queue-reset", { reason: "user-speech-started" });
         this._aiSpeaking = false;
         this._userAudioRecorder.speechStarted({
           itemId: typeof event.item_id === "string" ? event.item_id : "",
@@ -737,8 +893,9 @@ export class S2sWsRealtimeClient extends EventTarget {
 
       case "response.audio.delta":
       case "response.output_audio.delta": {
-        this._pushAudioDelta(event.delta);
         const rid = event.response_id ?? event.response?.id;
+        this._beginPlaybackResponse(String(rid || ""));
+        this._pushAudioDelta(event.delta);
         if (rid) this._audibleResponses.add(rid);
         if (!this._aiSpeaking) {
           this._aiSpeaking = true;
@@ -756,13 +913,9 @@ export class S2sWsRealtimeClient extends EventTarget {
       }
 
       case "response.done": {
-        this._aiSpeaking = false;
         // This response freed the slot (completion OR cancellation both arrive
         // as response.done). Decrement and, if a create was waiting, replay it.
         this._openResponses = Math.max(0, this._openResponses - 1);
-        if (this._status === "ai-speaking" || this._status === "processing") {
-          this._setStatus("connected");
-        }
         // A response closes here for BOTH normal completion and cancellation
         // (the s2s server signals a speculative-turn interrupt as
         // `response.done` with status "cancelled" — there is no separate
@@ -782,12 +935,47 @@ export class S2sWsRealtimeClient extends EventTarget {
           extractResponseTranscript(event.response) ||
           this._asstDisplay(responseId) ||
           "";
-        // Response finished — clear both transcript accumulators for it.
-        this._asstTranscriptByResp.delete(responseId);
-        this._asstFullByResp.delete(responseId);
-        this.dispatchEvent(new CustomEvent("response-finished", {
-          detail: { responseId, status, audible, transcript },
-        }));
+        const waitForPlaybackDrain = this._playbackDiagnostics.active
+          && this._playbackDiagnostics.responseId === responseId
+          && status !== "cancelled";
+        if (this._playbackDiagnostics.active && this._playbackDiagnostics.responseId === responseId) {
+          const diagnostics = this._playbackDiagnostics;
+          const deliveryDurationMs = diagnostics.lastChunkAt && diagnostics.firstChunkAt
+            ? diagnostics.lastChunkAt - diagnostics.firstChunkAt
+            : 0;
+          const generatedAudioDurationMs = (diagnostics.byteCount / (OUTPUT_SAMPLE_RATE * 2)) * 1000;
+          this._playbackNode?.port.postMessage({ kind: "response-end" });
+          this._sendPlaybackDiagnostic("provider-response-complete", {
+            status,
+            chunkCount: diagnostics.chunkCount,
+            byteCount: diagnostics.byteCount,
+            generatedAudioDurationMs,
+            deliveryDurationMs,
+            providerStreamRatio: deliveryDurationMs > 0
+              ? generatedAudioDurationMs / deliveryDurationMs
+              : null,
+          });
+          if (status === "cancelled") {
+            this._playbackNode?.port.postMessage({
+              kind: "clear",
+              reason: "response-cancelled",
+            });
+            this._sendPlaybackDiagnostic("queue-reset", { reason: "response-cancelled" });
+            this._playbackDiagnostics.active = false;
+          }
+        }
+        const detail = { responseId, status, audible, transcript };
+        if (waitForPlaybackDrain) {
+          this._pendingPlaybackResponse = { detail };
+        } else {
+          this._asstTranscriptByResp.delete(responseId);
+          this._asstFullByResp.delete(responseId);
+          this._aiSpeaking = false;
+          if (this._status === "ai-speaking" || this._status === "processing") {
+            this._setStatus("connected");
+          }
+          this.dispatchEvent(new CustomEvent("response-finished", { detail }));
+        }
         // The slot is free now — replay a queued create (e.g. a tool follow-up
         // that arrived while this response was still running).
         this._flushQueuedCreate();
@@ -928,6 +1116,16 @@ export class S2sWsRealtimeClient extends EventTarget {
     if (!this._playbackNode) return;
     if (!b64) return;
     const bytes = base64ToBytes(b64);
+    const diagnostics = this._playbackDiagnostics;
+    const arrivalAt = performance.now();
+    if (!diagnostics.firstChunkAt) diagnostics.firstChunkAt = arrivalAt;
+    diagnostics.lastChunkAt = arrivalAt;
+    diagnostics.chunkCount += 1;
+    diagnostics.byteCount += bytes.byteLength;
+    this._sendPlaybackDiagnostic("audio-chunk", {
+      byteCount: bytes.byteLength,
+      cumulativeByteCount: diagnostics.byteCount,
+    });
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const samples = new Float32Array(bytes.byteLength / 2);
     for (let i = 0; i < samples.length; i++) {
@@ -940,6 +1138,16 @@ export class S2sWsRealtimeClient extends EventTarget {
   /** @param {CloseEvent} ev */
   _onWsClose(ev) {
     console.log("[ws] socket closed:", ev.code, ev.reason);
+    const hadPendingPlaybackResponse = Boolean(this._pendingPlaybackResponse);
+    if (hadPendingPlaybackResponse) {
+      this._playbackNode?.port.postMessage({ kind: "clear", reason: "socket-closed" });
+      this._playbackDiagnostics.active = false;
+    }
+    this._sendPlaybackDiagnostic("queue-reset", {
+      reason: "socket-closed",
+      code: ev.code,
+    });
+    if (hadPendingPlaybackResponse) this._finishPendingPlaybackResponse();
     if (this._status === "closed" || this._status === "error") return;
     if (ev.code === 1000) {
       this._setStatus("closed");
@@ -951,6 +1159,20 @@ export class S2sWsRealtimeClient extends EventTarget {
       );
       this._setStatus("error");
     }
+  }
+
+  _attachCanonicalMetadata(session) {
+    const conversationId = String(this._conversationId || "").trim();
+    if (this._canonicalConversationRequired && !conversationId) {
+      throw new Error("Canonical conversation_id is required before session.update");
+    }
+    if (conversationId) {
+      session.metadata = { conversation_id: conversationId };
+    }
+    if (this._canonicalConversationRequired && session.metadata?.conversation_id !== conversationId) {
+      throw new Error("session.update canonical conversation_id mismatch");
+    }
+    return conversationId;
   }
 
   _sendSessionUpdate() {
@@ -969,6 +1191,7 @@ export class S2sWsRealtimeClient extends EventTarget {
         output: { voice: this.options.voice },
       },
     };
+    const conversationId = this._attachCanonicalMetadata(session);
     // Tools are declared here; the backend already accepts them in
     // session.update and emits response.function_call_arguments.done when the
     // model decides to call one. Only include the keys when we actually have
@@ -978,6 +1201,7 @@ export class S2sWsRealtimeClient extends EventTarget {
       session.tool_choice = "auto";
     }
     this._send({ type: "session.update", session });
+    return conversationId;
   }
 
   /** Update voice/instructions on a live session without tearing down. */
@@ -988,6 +1212,7 @@ export class S2sWsRealtimeClient extends EventTarget {
     if (patch.instructions) session.instructions = patch.instructions;
     if (patch.voice) session.audio = { output: { voice: patch.voice } };
     if (Object.keys(session).length > 1) {
+      this._attachCanonicalMetadata(session);
       this._send({ type: "session.update", session });
     }
   }
@@ -1000,9 +1225,11 @@ export class S2sWsRealtimeClient extends EventTarget {
    */
   setTools(tools) {
     this._tools = tools;
+    const session = { type: "realtime", tools, tool_choice: tools.length ? "auto" : "none" };
+    this._attachCanonicalMetadata(session);
     this._send({
       type: "session.update",
-      session: { type: "realtime", tools, tool_choice: tools.length ? "auto" : "none" },
+      session,
     });
   }
 
@@ -1108,6 +1335,97 @@ export class S2sWsRealtimeClient extends EventTarget {
     this._muted = muted;
   }
 
+  _attachMicStream(stream) {
+    if (!this._ctx || !this._captureNode || !this._micAnalyser) {
+      throw new Error("Audio pipeline is not ready");
+    }
+    this._micSrc?.disconnect();
+    const micSrc = this._ctx.createMediaStreamSource(stream);
+    micSrc.connect(this._captureNode);
+    micSrc.connect(this._micAnalyser);
+    this._micSrc = micSrc;
+    this.options.micStream = stream;
+  }
+
+  async resumeMicCapture() {
+    await this._configuredPromise;
+    if (this.options.micStream?.getAudioTracks().some((track) => track.readyState === "live")) {
+      this._muted = false;
+      return this.captureStatus();
+    }
+    if (!this._acquireMic) throw new Error("No microphone acquisition callback configured");
+    const stream = await this._acquireMic();
+    this._attachMicStream(stream);
+    this._muted = false;
+    return this.captureStatus();
+  }
+
+  async pauseMicCapture() {
+    const needsVadDrain = this._status === "user-speaking";
+    this._muted = true;
+    try { this._micSrc?.disconnect(); } catch {}
+    this._micSrc = null;
+    for (const track of this.options.micStream?.getTracks() || []) track.stop();
+    this.options.micStream = undefined;
+    // If capture ends while server VAD is inside speech, no further real mic
+    // frames exist to satisfy the 800ms silence boundary. The Voice frontend
+    // already owns PCM transport, so append a bounded zero tail *after* the
+    // physical tracks are stopped. This closes the realtime turn without
+    // keeping the microphone alive or involving Electron/media IPC.
+    if (needsVadDrain && this._ws?.readyState === WebSocket.OPEN && this._sessionConfigured) {
+      const zeroChunk = base64FromArrayBuffer(new ArrayBuffer(1280)); // 40ms PCM16 @ 16kHz
+      for (let i = 0; i < 25; i += 1) {
+        this._send({ type: "input_audio_buffer.append", audio: zeroChunk });
+      }
+    }
+    return this.captureStatus();
+  }
+
+  captureStatus() {
+    const tracks = this.options.micStream?.getAudioTracks() || [];
+    return {
+      paused: tracks.length === 0 || tracks.every((track) => track.readyState === "ended"),
+      hasMicSource: Boolean(this._micSrc),
+      liveTracks: tracks.filter((track) => track.readyState === "live").length,
+      status: this._status,
+    };
+  }
+
+  async waitForSettled(timeoutMs = 15000) {
+    const started = Date.now();
+    while (this._responseActive() || ["user-speaking", "processing", "ai-speaking"].includes(this._status)) {
+      if (Date.now() - started >= timeoutMs) throw new Error("Voice workspace drain timeout");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+
+  async seedConversationHistory(messages, timeoutMs = 5000) {
+    await this._configuredPromise;
+    let accepted = 0;
+    for (const message of messages || []) {
+      const type = message.role === "user" ? "input_text" : "output_text";
+      const ack = new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          const index = this._pendingItemCreates.findIndex((item) => item.resolve === resolve);
+          if (index >= 0) this._pendingItemCreates.splice(index, 1);
+          reject(new Error("conversation.item.created timeout"));
+        }, timeoutMs);
+        this._pendingItemCreates.push({ resolve, reject, timer });
+      });
+      this._send({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: message.role,
+          content: [{ type, text: message.content }],
+        },
+      });
+      await ack;
+      accepted += 1;
+    }
+    return { acceptedMessages: accepted };
+  }
+
   /**
    * Update the mic noise gate live (the user moved the Settings cursor).
    * @param {NoiseGate} gate
@@ -1127,6 +1445,10 @@ export class S2sWsRealtimeClient extends EventTarget {
     // Abort a queue wait in progress: flag it and wake the poll sleep so
     // `_pollQueue` throws "aborted" and connect() unwinds cleanly.
     this._closed = true;
+    for (const pending of this._pendingItemCreates.splice(0)) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("client closed"));
+    }
     this._userAudioRecorder.reset();
     if (this._queueWake) {
       clearTimeout(this._queueTimer);
@@ -1146,12 +1468,29 @@ export class S2sWsRealtimeClient extends EventTarget {
     }
     this._visualiser?.stop();
     this._visualiser = null;
-    try {
-      if (this._ws && this._ws.readyState <= WebSocket.OPEN) {
-        this._ws.close(1000, "client closed");
-      }
-    } catch {
-      // ignored
+    // VOICE-WS-LIFECYCLE-001: close() must not be fire-and-forget. The S2S
+    // single-slot pipeline releases its slot only after it processes the
+    // close; dialing the next session before that release races the handoff
+    // and is rejected with 1008. Await the socket's close event so teardown
+    // completion == server resource released. A timeout keeps teardown from
+    // hanging on a dead peer.
+    const ws = this._ws;
+    if (ws && ws.readyState <= WebSocket.OPEN) {
+      await new Promise((resolve) => {
+        const CLOSE_TIMEOUT_MS = 1000;
+        const done = () => {
+          clearTimeout(timer);
+          ws.removeEventListener("close", done);
+          resolve();
+        };
+        const timer = setTimeout(done, CLOSE_TIMEOUT_MS);
+        ws.addEventListener("close", done);
+        try {
+          ws.close(1000, "client closed");
+        } catch {
+          done();
+        }
+      });
     }
     this._ws = null;
 

@@ -35,9 +35,12 @@ from speech_to_speech.LLM.base_openai_compatible_language_model import (
 )
 from speech_to_speech.LLM.chat import Chat
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn
+from speech_to_speech.pipeline.latency import emit_current, recorder
 from speech_to_speech.utils.utils import _generate_id
 
 logger = logging.getLogger(__name__)
+
+_SESSION_EXTRA_BODY_KEY = "_session_extra_body"
 
 
 def _to_chat_tools(req_tools: Any) -> list[ChatCompletionToolParam] | None:
@@ -169,13 +172,47 @@ def _request_chat_completions(
 ) -> Any:
     """Issue a Chat Completions request with consistent streaming usage accounting."""
     create_kwargs = dict(optional_kwargs)
+    session_extra_body = create_kwargs.pop(_SESSION_EXTRA_BODY_KEY, None)
+    merged_extra_body = None
+    if extra_body or session_extra_body:
+        merged_extra_body = {}
+        if extra_body:
+            merged_extra_body.update(extra_body)
+        if session_extra_body:
+            merged_extra_body.update(session_extra_body)
     if stream:
         create_kwargs["stream_options"] = {"include_usage": True}
+    request_conversation_id = ""
+    request_turn_id = ""
+    request_voice_trace_id = ""
+    request_turn_revision = None
+    if isinstance(merged_extra_body, dict):
+        request_conversation_id = str(merged_extra_body.get("conversation_id") or "").strip()
+        request_turn_id = str(merged_extra_body.get("turn_id") or "").strip()
+        request_voice_trace_id = str(merged_extra_body.get("voice_trace_id") or "").strip()
+        request_turn_revision = merged_extra_body.pop("_turn_revision", None)
+    logger.info(
+        "CC1_BRAIN_REQUEST conversation_id=%s voice_trace_id=%s",
+        request_conversation_id or "EMPTY",
+        request_voice_trace_id or "EMPTY",
+    )
+    recorder.emit(
+        "T6_BRAIN_REQUEST_SENT",
+        turn_id=request_turn_id or request_voice_trace_id or None,
+        turn_revision=request_turn_revision if isinstance(request_turn_revision, int) else None,
+        conversation_id=request_conversation_id or None,
+    )
+    recorder.emit(
+        "BRAIN_REQUEST_SENT",
+        turn_id=request_turn_id or request_voice_trace_id or None,
+        turn_revision=request_turn_revision if isinstance(request_turn_revision, int) else None,
+        conversation_id=request_conversation_id or None,
+    )
     return client.chat.completions.create(
         model=model_name,
         messages=messages,
         stream=stream,
-        extra_body=extra_body,
+        extra_body=merged_extra_body,
         timeout=timeout,
         **create_kwargs,
     )
@@ -204,6 +241,7 @@ def _iter_chat_stream_events(api_response: Stream[ChatCompletionChunk]) -> Itera
     tool_accum: dict[int, dict[str, str]] = {}
     usage: Usage | None = None
     raw_text = ""
+    first_token_emitted = False
     for chunk in api_response:
         if chunk.usage is not None:
             usage = Usage(
@@ -225,6 +263,9 @@ def _iter_chat_stream_events(api_response: Stream[ChatCompletionChunk]) -> Itera
                         entry["args"] += tool_call.function.arguments
         text_piece = delta.content or getattr(delta, "refusal", None)
         if text_piece:
+            if not first_token_emitted:
+                first_token_emitted = True
+                emit_current("LLM_FIRST_CHUNK_RECEIVED")
             raw_text += text_piece
             yield TextDelta(text=text_piece)
 
@@ -319,6 +360,37 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
         return _chat_messages(chat, audio_content_type=audio_content_type)
 
     # ── base hooks ──────────────────────────────────────────────────────────--
+
+    def _augment_request_optional_kwargs(
+        self,
+        runtime_config: Any,
+        optional_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        metadata = getattr(getattr(runtime_config, "session", None), "metadata", None)
+        voice_trace_id = str(optional_kwargs.get("_voice_trace_id", "") or "").strip()
+        conversation_id = ""
+        if isinstance(metadata, dict):
+            conversation_id = str(metadata.get("conversation_id") or "").strip()
+
+        if not voice_trace_id and not conversation_id:
+            return optional_kwargs
+
+        augmented = dict(optional_kwargs)
+        augmented.pop("_voice_trace_id", None)
+        turn_revision = augmented.pop("_turn_revision", None)
+        session_extra_body = dict(augmented.get(_SESSION_EXTRA_BODY_KEY) or {})
+
+        if voice_trace_id:
+            session_extra_body["voice_trace_id"] = voice_trace_id
+            # RP-2: canonical turn identity — S2S native turn_id as CRT turn_id
+            session_extra_body["turn_id"] = voice_trace_id
+            if turn_revision is not None:
+                session_extra_body["_turn_revision"] = turn_revision
+        if conversation_id:
+            session_extra_body["conversation_id"] = conversation_id
+
+        augmented[_SESSION_EXTRA_BODY_KEY] = session_extra_body
+        return augmented
 
     def _serialize(self, active_chat: Chat) -> list[dict[str, Any]]:
         return self._chat_messages(active_chat, audio_content_type=self.audio_content_type)

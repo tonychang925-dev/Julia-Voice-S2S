@@ -1,0 +1,70 @@
+#!/bin/bash
+# Julia Release Control Plane — Atomic Activation
+# Usage: julia-release-activate <release_root>
+# Never modify an existing release. Never manually cp files into /releases.
+# Read-only after creation. Activated via atomic `current` symlink swap.
+
+set -euo pipefail
+
+RELEASE_ROOT="${1:-}"
+[ -z "$RELEASE_ROOT" ] && { echo "usage: julia-release-activate <release_root>"; exit 1; }
+[ -d "$RELEASE_ROOT" ] || { echo "FATAL: $RELEASE_ROOT not found"; exit 1; }
+
+MANIFEST="$RELEASE_ROOT/manifest.json"
+[ -f "$MANIFEST" ] || { echo "FATAL: no manifest.json in $RELEASE_ROOT"; exit 1; }
+
+RELEASES_BASE="/root/julia_voice_v2/releases"
+CURRENT_LINK="$RELEASES_BASE/current"
+CURRENT_NEW="$RELEASES_BASE/current.new"
+RUN_BASE="/root/julia_voice_v2/run/current"
+
+# ── 1. Prevent activation of contaminated releases ──
+if [ -f "$RELEASE_ROOT/CONTAMINATED.txt" ]; then
+    echo "FATAL: $RELEASE_ROOT is marked CONTAMINATED. Cannot activate."
+    cat "$RELEASE_ROOT/CONTAMINATED.txt"
+    exit 1
+fi
+
+# ── 2. Lock release as read-only ──
+chmod -R a-w "$RELEASE_ROOT" 2>/dev/null || true
+
+# ── 3. Record previous release for rollback ──
+if [ -L "$CURRENT_LINK" ]; then
+    PREVIOUS=$(readlink -f "$CURRENT_LINK" 2>/dev/null || echo "")
+    echo "$PREVIOUS" > "$RELEASES_BASE/.previous"
+    echo "Previous release: $PREVIOUS"
+fi
+
+# ── 4. Atomic symlink swap ──
+ln -sfn "$RELEASE_ROOT" "$CURRENT_NEW"
+mv -f "$CURRENT_NEW" "$CURRENT_LINK"
+
+# ── 5. Create run directory ──
+mkdir -p "$RUN_BASE/logs"
+
+# ── 6. Update env to use current ──
+ENV_FILE="/etc/julia/julia-voice.env"
+cat > "$ENV_FILE" <<'ENVEOF'
+# Julia Voice production runtime — managed by Release Control Plane
+# Do not edit manually. Use julia-release-activate.
+
+JULIA_S2S_CURRENT=/root/julia_voice_v2/releases/current
+JULIA_S2S_RUN_ROOT=/root/julia_voice_v2/run/current
+JULIA_S2S_LOG=/root/julia_voice_v2/run/current/s2s.log
+JULIA_S2S_PYTHON=/root/miniconda3/bin/python
+JULIA_S2S_CONSOLE=/root/miniconda3/bin/speech-to-speech
+
+HF_HOME=/root/autodl-tmp/huggingface
+HF_ENDPOINT=https://hf-mirror.com
+PYTHONDONTWRITEBYTECODE=1
+PYTHONPATH=/root/julia_voice_v2/releases/current/release
+LANG=en_US.UTF-8
+
+BRAIN_BASE_URL=http://127.0.0.1:8089/v1
+S2S_HOST=0.0.0.0
+S2S_PORT=8765
+REF_AUDIO=/root/julia_voice_v2/golden/julia_ref.wav
+ENVEOF
+
+echo "Activated: $(cat "$MANIFEST" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("source_commit","?")[:12])')"
+echo "current → $RELEASE_ROOT"

@@ -701,8 +701,8 @@ class LanguageModelHandler(BaseLanguageModelHandler):
                 self._finish_mlx_generation(token_iter)
             try:
                 mx.clear_cache()
-            except Exception:
-                pass
+            except Exception as exc:
+                import logging; logging.getLogger("julia.failclosed").warning("%s:%d silent pass removed: %%s", "s2s/LLM/language_model.py", 704, exc_info=True)
             torch.mps.empty_cache()
         else:
             self._cancel_criteria.reset()
@@ -873,8 +873,8 @@ class VisionLanguageModelHandler(BaseLanguageModelHandler):
                 self._finish_mlx_generation(token_iter)
             try:
                 mx.clear_cache()
-            except Exception:
-                pass
+            except Exception as exc:
+                import logging; logging.getLogger("julia.failclosed").warning("%s:%d silent pass removed: %%s", "s2s/LLM/language_model.py", 876, exc_info=True)
             torch.mps.empty_cache()
         else:
             inputs, input_tokens = self._prepare_vlm_inputs(prepared)

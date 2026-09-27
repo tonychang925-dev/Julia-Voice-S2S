@@ -1,0 +1,58 @@
+# VOICE-EL-P0D-1 — repository-defined runtime argument vector for an experiment.
+#
+# This file, not a shell history and not a document a human retypes, is the
+# authority for how an experiment launches. One argument per line; blank lines
+# and lines starting with '#' are ignored.
+#
+# Placeholders substituted by launch_experiment.sh from namespace.env:
+#   %S2S_HOST%  %S2S_PORT%
+#
+# Deliberately absent:
+#   --elevenlabs_voice_id   the voice identity and the API key come from the
+#   --elevenlabs_api_key*   server's existing environment. Only the NAME of the
+#                           variable is repository-defined (see namespace.env);
+#                           the value is injected, never passed on a command
+#                           line, never written into the artifact.
+
+--mode
+realtime
+--ws_host
+%S2S_HOST%
+--ws_port
+%S2S_PORT%
+--stt
+faster-whisper
+--faster_whisper_stt_model_name
+large-v3
+--faster_whisper_stt_gen_language
+zh
+--language
+zh
+--no_enable_live_transcription
+--llm_backend
+chat-completions
+--model_name
+baseline
+--responses_api_base_url
+http://127.0.0.1:8089/v1
+--responses_api_stream
+--tts
+elevenlabs
+--elevenlabs_model_id
+eleven_v3_conversational
+--elevenlabs_output_format
+pcm_16000
+--thresh
+0.6
+--min_speech_ms
+500
+--min_speech_continuation_ms
+192
+--min_silence_ms
+800
+--speech_pad_ms
+300
+--speculative_reopen_ms
+2500
+--short_segment_merge_ms
+800

@@ -976,15 +976,15 @@ class Qwen3TTSHandler(BaseHandler[TTSIn, TTSOut]):
             for path in list(getattr(self, "_mlx_temp_ref_audio_files", set())):
                 try:
                     Path(path).unlink(missing_ok=True)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    import logging; logging.getLogger("julia.failclosed").warning("%s:%d silent pass removed: %%s", "s2s/TTS/qwen3_tts_handler.py", 979, exc_info=True)
             if self.backend == "mlx":
                 try:
                     import mlx.core as mx
 
                     mx.clear_cache()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    import logging; logging.getLogger("julia.failclosed").warning("%s:%d silent pass removed: %%s", "s2s/TTS/qwen3_tts_handler.py", 986, exc_info=True)
             else:
                 import torch
 

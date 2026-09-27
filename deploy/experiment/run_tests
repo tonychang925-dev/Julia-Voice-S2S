@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""Artifact-side native gate entrypoint (VOICE-EL-P0D-1, Workstream E).
+
+This is the only thing a server is asked to execute for experiment validation::
+
+    "$EXPERIMENT_PYTHON" <release>/experiment/run_tests --expected-sha <sha>
+
+INVOCATION CONTRACT — the shebang above is a convenience for humans and MUST NOT
+be relied upon. The target server's non-interactive PATH does not resolve
+`python3` (P0D-0 proved this), so the launcher always invokes this file through
+the repository-declared absolute interpreter::
+
+    EXPERIMENT_PYTHON=/root/miniconda3/bin/python
+
+It is self-locating: it lives at ``<release>/experiment/run_tests``, so the
+release root is derived from ``__file__`` rather than supplied or guessed.
+
+Sequence:
+
+  1. load the repository-defined namespace contract shipped beside it,
+  2. MATERIALIZE it — templates become concrete roots, using the single shared
+     implementation in namespace.py, so the gate validates exactly the namespace
+     the launcher will create,
+  3. put ``<release>/release`` at the front of the import path so the release
+     wins over the installed ``speech_to_speech`` package,
+  4. hand over to native_gate, which attests the import locus and refuses to run
+     if the release did not actually win.
+
+No pytest, no network, no installation, no writes outside the declared namespace.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+
+EXPERIMENT_DIR = os.path.dirname(os.path.abspath(__file__))
+RELEASE_ROOT = os.path.dirname(EXPERIMENT_DIR)
+RELEASE_TREE = os.path.join(RELEASE_ROOT, "release")
+NAMESPACE_ENV = os.path.join(EXPERIMENT_DIR, "namespace.env")
+
+# The interpreter that is running this file is, by construction, the repository-
+# declared one (the launcher passes it explicitly). Record it for the evidence.
+DECLARED_INTERPRETER = sys.executable
+
+
+def materialize_namespace(expected_sha: str) -> dict:
+    """Concrete namespace, via the one shared implementation."""
+    sys.path.insert(0, EXPERIMENT_DIR)
+    import namespace  # noqa: E402  (repository-owned sibling module)
+
+    result = namespace.concrete_for_release(NAMESPACE_ENV, RELEASE_ROOT, expected_sha)
+
+    # Publish both the raw contract and the concrete roots. native_gate checks
+    # the concrete ones; keeping the raw ones means nothing is hidden.
+    for key, value in result["concrete"].items():
+        os.environ.setdefault(key, value)
+    for key, value in result["roots"].items():
+        os.environ.setdefault(key, value)
+    return result
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Run the experiment release's native deployment gate.")
+    parser.add_argument("--expected-sha", required=True,
+                        help="Exact source commit the artifact must have been built from.")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+
+    if not os.path.isdir(RELEASE_TREE):
+        print(f"FATAL: no release tree at {RELEASE_TREE} — artifact is not laid out as expected",
+              file=sys.stderr)
+        return 2
+
+    ns = materialize_namespace(args.expected_sha)
+    if ns["missing_templates"] or ns["unresolved"]:
+        print(f"FATAL: namespace contract incomplete: missing={ns['missing_templates']} "
+              f"unresolved={ns['unresolved']}", file=sys.stderr)
+        return 2
+
+    # Release precedence. This is the mechanism that keeps the installed
+    # site-packages copy from silently winning; the locus gate then proves it.
+    sys.path.insert(0, RELEASE_TREE)
+    existing = os.environ.get("PYTHONPATH", "")
+    parts = [RELEASE_TREE] + [p for p in existing.split(os.pathsep) if p and p != RELEASE_TREE]
+    os.environ["PYTHONPATH"] = os.pathsep.join(parts)
+
+    sys.path.insert(0, EXPERIMENT_DIR)
+    import native_gate  # noqa: E402
+
+    print(f"release root   : {RELEASE_ROOT}")
+    print(f"import root    : {RELEASE_TREE}")
+    print(f"interpreter    : {DECLARED_INTERPRETER}")
+    print(f"PYTHONPATH     : {os.environ['PYTHONPATH']}")
+    print(f"run root       : {ns['roots']['EXPERIMENT_RUN_ROOT']}")
+    print(f"log root       : {ns['roots']['EXPERIMENT_LOG_ROOT']}")
+    print(f"tmp root       : {ns['roots']['EXPERIMENT_TMP_ROOT']}")
+    print("")
+
+    return native_gate.main(["--release-root", RELEASE_ROOT, "--expected-sha", args.expected_sha]
+                            + (["--json"] if args.json else []))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

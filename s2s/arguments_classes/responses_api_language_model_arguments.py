@@ -28,6 +28,13 @@ class ResponsesApiLanguageModelHandlerArguments(LanguageModelBaseArguments):
             " than in a single, complete response, often used for handling large or real-time data.Default is True"
         },
     )
+    responses_api_warmup_enabled: bool = field(
+        default=True,
+        metadata={
+            "help": "Run a semantic generation request during handler setup. Disable for Julia Brain, whose "
+            "canonical conversation path must not depend on the legacy no-conversation compatibility route."
+        },
+    )
     responses_api_disable_thinking: bool = field(
         default=True,
         metadata={
